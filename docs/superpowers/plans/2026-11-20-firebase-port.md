@@ -472,6 +472,10 @@ export async function rotateCode(eventId, oldCode) {
   }
   const evRef = doc(db, COL, eventId);
 
+  // ORDER MATTERS. Subcollection writes authorize by looking up a gate doc at the
+  // code in the path. Both gate docs must exist while we migrate, so delete the
+  // old gate doc LAST — otherwise the migration writes are denied and the claims
+  // are lost, which would let every pass be scanned as "first" again.
   await runTransaction(db, async (tx) => {
     const ev = await tx.get(evRef);
     if (!ev.exists() || ev.data().gateCode !== oldCode) throw new Error("Code changed");
@@ -482,7 +486,7 @@ export async function rotateCode(eventId, oldCode) {
       recent: oldGate.data().recent || [],
     });
     tx.update(evRef, { gateCode: next });
-    tx.delete(doc(db, GATES, oldCode));
+    // no delete here
   });
 
   // Rewrite roster, claims and repeats under the new code, then remove old docs.
@@ -501,11 +505,13 @@ export async function rotateCode(eventId, oldCode) {
     for (const r of c.repeats) batch.set(doc(collection(db, GATES, next, "claims", c.id, "repeats")), r);
     await batch.commit();
   }
+  // Now that nothing points at the old code, remove it.
+  await deleteDoc(doc(db, GATES, oldCode));
   return next;
 }
 ```
 
-Note: `gp_gates/{code}` carries `total`, `checked`, `bounced` and a `recent` array. `total` is mirrored from the event doc when the gate doc is created; `checked`/`bounced` are incremented at scan time. The rules permit unauthenticated gate staff to update only `total`/`checked`/`bounced`/`recent`, so update the ruleset's `affectedKeys().hasOnly(...)` list from Task 2 Step 1 to include `total`.
+Note: `gp_gates/{code}` carries `total`, `checked`, `bounced` and a `recent` array. `total` is maintained by the owner; Security Rules restrict unauthenticated staff to `checked`/`bounced`/`recent` only. Tasks 2's follow-up fix already applied that rule change.
 
 - [ ] **Step 3: Gate join, stats, find** — append:
 
