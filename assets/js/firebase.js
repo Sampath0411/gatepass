@@ -160,9 +160,9 @@ export async function getPasses(eventId) {
 export async function generatePasses(eventId, rows, eventSnapshot) {
   // Never persist the gate code in a publicly readable pass document.
   const { gateCode, ...publicEvent } = eventSnapshot;
-  for (let i = 0; i < rows.length; i += 400) {
+  for (let i = 0; i < rows.length; i += 160) {
     const batch = writeBatch(db);
-    for (const p of rows.slice(i, i + 400)) {
+    for (const p of rows.slice(i, i + 160)) {
       const passId = doc(collection(db, COL, eventId, "passes")).id;
       const token = newToken();
       batch.set(doc(db, COL, eventId, "passes", passId), {
@@ -178,8 +178,8 @@ export async function generatePasses(eventId, rows, eventSnapshot) {
         hint: mask(p.contact), token, checkedInAt: null, gate: "",
       });
     }
-    batch.update(doc(db, COL, eventId), { total: increment(rows.slice(i, i + 400).length) });
-    batch.update(doc(db, GATES, gateCode), { total: increment(rows.slice(i, i + 400).length) });
+    batch.update(doc(db, COL, eventId), { total: increment(rows.slice(i, i + 160).length) });
+    batch.update(doc(db, GATES, gateCode), { total: increment(rows.slice(i, i + 160).length) });
     await batch.commit();
   }
 }
@@ -224,18 +224,22 @@ export async function rotateCode(eventId, oldCode) {
     const ev = await tx.get(evRef);
     if (!ev.exists() || ev.data().gateCode !== oldCode) throw new Error("Code changed");
     const oldGate = await tx.get(doc(db, GATES, oldCode));
+    if (!oldGate.exists()) throw new Error("Old gate doc missing");
+    const g = oldGate.data();
     tx.set(doc(db, GATES, next), {
-      eventId, total: oldGate.data().total || 0,
-      checked: oldGate.data().checked || 0, bounced: oldGate.data().bounced || 0,
-      recent: oldGate.data().recent || [],
+      eventId, total: g.total || 0,
+      checked: g.checked || 0, bounced: g.bounced || 0,
+      recent: g.recent || [],
+      name: g.name, club: g.club || "", venue: g.venue || "", art: g.art || 0,
+      startsAt: g.startsAt,
     });
     tx.update(evRef, { gateCode: next });
     // no delete here
   });
 
-  for (let i = 0; i < rows.length; i += 400) {
+  for (let i = 0; i < rows.length; i += 240) {
     const batch = writeBatch(db);
-    for (const r of rows.slice(i, i + 400)) {
+    for (const r of rows.slice(i, i + 240)) {
       batch.set(doc(db, GATES, next, "roster", r.id), r.data);
       batch.delete(doc(db, GATES, oldCode, "roster", r.id));
     }
@@ -277,7 +281,6 @@ let statsUnsub = null, statsCode = null;
 export function gateStats(code) {
   if (statsUnsub && statsCode === code) return;   // idempotent; scans call this often
   if (statsUnsub) statsUnsub();
-  statsCode = code;
   statsUnsub = onSnapshot(doc(db, GATES, code), (s) => {
     if (!s.exists()) return;
     const d = s.data();
@@ -286,19 +289,37 @@ export function gateStats(code) {
       recent: d.recent || [],
     }}));
   }, (e) => {
-    // A bad/rotated code yields permission-denied; signal it so the UI can react.
-    if (e.code === "permission-denied") {
-      window.dispatchEvent(new CustomEvent("gp-stats", { detail: null }));
-    }
+    // Bad/rotated codes and connectivity errors both need a payload whose shape
+    // consumers can read (they access e.detail.counts) without throwing.
+    const flag = e.code === "permission-denied" ? "badCode" : "offline";
+    window.dispatchEvent(new CustomEvent("gp-stats", { detail: {
+      [flag]: true,
+      counts: { total: 0, checked: 0, bounced: 0 },
+      recent: [],
+    }}));
   });
+  statsCode = code;
+}
+
+export function stopStats() {
+  if (statsUnsub) statsUnsub();
+  statsUnsub = null;
+  statsCode = null;
 }
 
 export async function gateFind(code, text) {
   const q = text.trim().toLowerCase();
   if (q.length < 2) return [];
-  const s = await getDocs(query(
-    collection(db, GATES, code, "roster"),
-    where("nameLower", ">=", q), where("nameLower", "<=", q + "\uf8ff"), limit(8)));
+  let s;
+  try {
+    s = await getDocs(query(
+      collection(db, GATES, code, "roster"),
+      where("nameLower", ">=", q), where("nameLower", "<=", q + "\uf8ff"), limit(8)));
+  } catch (e) {
+    // Rules deny reads under a nonexistent (invalid/rotated) gate code.
+    if (e.code === "permission-denied") return [];
+    throw e;
+  }
   return s.docs.map((d) => {
     const r = d.data();
     return {
