@@ -145,3 +145,165 @@ export async function deleteEvent(id) {
   parentRefs.forEach((r) => finalBatch.delete(r));
   await finalBatch.commit();
 }
+
+export async function getPasses(eventId) {
+  const snap = await getDocs(collection(db, COL, eventId, "passes"));
+  return snap.docs.map((d) => {
+    const p = d.data();
+    return {
+      id: d.id, name: p.name, contact: p.contact || "", token: p.token,
+      created_at: stamp(p.createdAt) || "",
+    };
+  });
+}
+
+export async function generatePasses(eventId, rows, eventSnapshot) {
+  // Never persist the gate code in a publicly readable pass document.
+  const { gateCode, ...publicEvent } = eventSnapshot;
+  for (let i = 0; i < rows.length; i += 400) {
+    const batch = writeBatch(db);
+    for (const p of rows.slice(i, i + 400)) {
+      const passId = doc(collection(db, COL, eventId, "passes")).id;
+      const token = newToken();
+      batch.set(doc(db, COL, eventId, "passes", passId), {
+        name: p.name, contact: p.contact || "", token,
+        createdAt: serverTimestamp(), checkedInAt: null, gate: "",
+      });
+      batch.set(doc(db, PASS_PUB, token), {
+        id: passId, eventId, name: p.name, event: publicEvent,
+        checkedInAt: null, gate: "",
+      });
+      batch.set(doc(db, GATES, gateCode, "roster", passId), {
+        name: p.name, nameLower: p.name.toLowerCase(),
+        hint: mask(p.contact), token, checkedInAt: null, gate: "",
+      });
+    }
+    batch.update(doc(db, COL, eventId), { total: increment(rows.slice(i, i + 400).length) });
+    batch.update(doc(db, GATES, gateCode), { total: increment(rows.slice(i, i + 400).length) });
+    await batch.commit();
+  }
+}
+
+function mask(contact = "") {
+  if (!contact) return "";
+  if (contact.includes("@")) {
+    const i = contact.indexOf("@");
+    return contact.slice(0, 2) + "•••" + contact.slice(i);
+  }
+  return "•••" + contact.replace(/\D/g, "").slice(-4);
+}
+
+export async function getPassByToken(token) {
+  const s = await getDoc(doc(db, PASS_PUB, token));
+  if (!s.exists()) return null;
+  const p = s.data();
+  return {
+    name: p.name, event: p.event,
+    checked_in_at: stamp(p.checkedInAt), gate: p.gate || "",
+  };
+}
+
+export async function rotateCode(eventId, oldCode) {
+  const next = newCode();
+  // Read the roster while the old gate doc still exists — rules gate reads on its existence.
+  const roster = await getDocs(collection(db, GATES, oldCode, "roster"));
+  const rows = roster.docs.map((d) => ({ id: d.id, data: d.data() }));
+  const claimSnap = await getDocs(collection(db, GATES, oldCode, "claims"));
+  const claims = [];
+  for (const c of claimSnap.docs) {
+    const reps = await getDocs(collection(db, GATES, oldCode, "claims", c.id, "repeats"));
+    claims.push({ id: c.id, data: c.data(), repeats: reps.docs.map((r) => r.data()) });
+  }
+  const evRef = doc(db, COL, eventId);
+
+  // ORDER MATTERS. Subcollection writes authorize by looking up a gate doc at the
+  // code in the path. Both gate docs must exist while we migrate, so delete the
+  // old gate doc LAST — otherwise the migration writes are denied and the claims
+  // are lost, which would let every pass be scanned as "first" again.
+  await runTransaction(db, async (tx) => {
+    const ev = await tx.get(evRef);
+    if (!ev.exists() || ev.data().gateCode !== oldCode) throw new Error("Code changed");
+    const oldGate = await tx.get(doc(db, GATES, oldCode));
+    tx.set(doc(db, GATES, next), {
+      eventId, total: oldGate.data().total || 0,
+      checked: oldGate.data().checked || 0, bounced: oldGate.data().bounced || 0,
+      recent: oldGate.data().recent || [],
+    });
+    tx.update(evRef, { gateCode: next });
+    // no delete here
+  });
+
+  for (let i = 0; i < rows.length; i += 400) {
+    const batch = writeBatch(db);
+    for (const r of rows.slice(i, i + 400)) {
+      batch.set(doc(db, GATES, next, "roster", r.id), r.data);
+      batch.delete(doc(db, GATES, oldCode, "roster", r.id));
+    }
+    await batch.commit();
+  }
+  for (const c of claims) {
+    const batch = writeBatch(db);
+    batch.set(doc(db, GATES, next, "claims", c.id), c.data);
+    batch.delete(doc(db, GATES, oldCode, "claims", c.id));
+    for (const r of c.repeats) batch.set(doc(collection(db, GATES, next, "claims", c.id, "repeats")), r);
+    await batch.commit();
+  }
+  // Now that nothing points at the old code, remove it.
+  await deleteDoc(doc(db, GATES, oldCode));
+  return next;
+}
+
+export async function joinGate(code) {
+  let s;
+  try {
+    s = await getDoc(doc(db, GATES, code));
+  } catch (e) {
+    // Rules deny get on a nonexistent gate doc, so an invalid/rotated code
+    // surfaces as permission-denied rather than a clean miss.
+    if (e.code === "permission-denied") return null;
+    throw e;
+  }
+  if (!s.exists()) return null;
+  const d = s.data();
+  // Gate staff are unauthenticated: read everything from the gate doc, never gp_events.
+  return {
+    event_id: d.eventId, name: d.name, club: d.club || "",
+    starts_at: stamp(d.startsAt), venue: d.venue || "", art: d.art || 0,
+    counts: { total: d.total || 0, checked: d.checked || 0, bounced: d.bounced || 0 },
+  };
+}
+
+let statsUnsub = null, statsCode = null;
+export function gateStats(code) {
+  if (statsUnsub && statsCode === code) return;   // idempotent; scans call this often
+  if (statsUnsub) statsUnsub();
+  statsCode = code;
+  statsUnsub = onSnapshot(doc(db, GATES, code), (s) => {
+    if (!s.exists()) return;
+    const d = s.data();
+    window.dispatchEvent(new CustomEvent("gp-stats", { detail: {
+      counts: { total: d.total || 0, checked: d.checked || 0, bounced: d.bounced || 0 },
+      recent: d.recent || [],
+    }}));
+  }, (e) => {
+    // A bad/rotated code yields permission-denied; signal it so the UI can react.
+    if (e.code === "permission-denied") {
+      window.dispatchEvent(new CustomEvent("gp-stats", { detail: null }));
+    }
+  });
+}
+
+export async function gateFind(code, text) {
+  const q = text.trim().toLowerCase();
+  if (q.length < 2) return [];
+  const s = await getDocs(query(
+    collection(db, GATES, code, "roster"),
+    where("nameLower", ">=", q), where("nameLower", "<=", q + "\uf8ff"), limit(8)));
+  return s.docs.map((d) => {
+    const r = d.data();
+    return {
+      id: d.id, name: r.name, hint: r.hint, token: r.token,
+      checked_in_at: stamp(r.checkedInAt), gate: r.gate || "",
+    };
+  });
+}
