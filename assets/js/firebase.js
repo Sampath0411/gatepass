@@ -219,22 +219,29 @@ export async function rotateCode(eventId, oldCode) {
   if (!oldGate.exists()) throw new Error("Old gate doc missing");
   const g = oldGate.data();
 
-  // First attempt: durably record the chosen target code and pre-create its gate
-  // doc. Subcollection writes below authorize by looking up a gate doc at the code
-  // in the path, so both gate docs must coexist until the final transaction.
-  // On a retry the pendingCode/new gate already exist, so this is skipped.
-  if (!evData.pendingCode) {
+  // First attempt only: durably record the chosen target code. Both the initial
+  // guard and the transaction re-check that we're still on oldCode and that no
+  // other rotation has claimed this event with a pendingCode.
+  if (evData.gateCode === oldCode && !evData.pendingCode) {
     await runTransaction(db, async (tx) => {
       const fresh = await tx.get(evRef);
-      if (!fresh.exists() || fresh.data().gateCode !== oldCode) throw new Error("Code changed");
+      if (!fresh.exists() || fresh.data().gateCode !== oldCode || fresh.data().pendingCode) {
+        throw new Error("Code changed");
+      }
       tx.update(evRef, { pendingCode: next });
-      tx.set(doc(db, GATES, next), {
-        eventId, name: g.name, club: g.club || "", venue: g.venue || "", art: g.art || 0,
-        startsAt: g.startsAt, total: g.total || 0, checked: g.checked || 0,
-        bounced: g.bounced || 0, recent: g.recent || [],
-      });
     });
   }
+
+  // Refresh the target gate doc on EVERY attempt. Scans and edits on the old code
+  // may have advanced counters/metadata since a failed attempt, so a retry must
+  // converge on the current snapshot rather than keeping the first attempt's.
+  // Subcollection writes below authorize by looking up a gate doc at the code in
+  // the path, so both gate docs must coexist until the final transaction.
+  await setDoc(doc(db, GATES, next), {
+    eventId, name: g.name, club: g.club || "", venue: g.venue || "", art: g.art || 0,
+    startsAt: g.startsAt, total: g.total || 0, checked: g.checked || 0,
+    bounced: g.bounced || 0, recent: g.recent || [],
+  });
 
   // COPY ONLY — never delete anything under oldCode. Every write below is a set
   // under next, so an interrupted migration leaves the ACTIVE old gate fully
