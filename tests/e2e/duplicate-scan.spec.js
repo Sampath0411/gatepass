@@ -8,22 +8,29 @@
  * Everything the app needs to talk to the emulator is overridden from this file:
  * no production source file is touched.
  *
- * Run (from the repo root):
- *   cd tests && npm install && npm install --no-save @playwright/test
- *   npx playwright test e2e/duplicate-scan.spec.js
+ * Run from tests/ (where Playwright is installed):
+ *   cd tests
+ *   npm ci
+ *   npx playwright install chromium
+ *   npm run test:e2e
+ *   # or: npx playwright test e2e/duplicate-scan.spec.js
  *
- * Or, from the repo root, exactly as the plan says:
- *   npx playwright test tests/e2e/duplicate-scan.spec.js
+ * Running `npx playwright test tests/e2e/duplicate-scan.spec.js` from the repo
+ * root works only if Playwright is also installed at the repo root; otherwise
+ * npx loads a second copy of Playwright and the runner rejects the spec file.
  *
  * The spec starts its own Firestore emulator on GP_E2E_FIRESTORE_PORT (default
  * 8081, deliberately not Task 10's 8080) and serves the static site itself, so
- * it is self-contained. Set GP_E2E_EMULATOR=0 if you already have an emulator
- * running on that port and want to reuse it.
+ * it is self-contained. The emulator config is generated at runtime in a temp
+ * directory with that port; tests/e2e/firebase.json is the default-8081
+ * reference. Set GP_E2E_EMULATOR=0 to reuse an emulator already running on
+ * GP_E2E_FIRESTORE_PORT (that port is then used for every connection).
  */
 import { test, expect } from "@playwright/test";
 import { spawn, spawnSync } from "node:child_process";
-import { readFile, readFileSync } from "node:fs";
+import { mkdtempSync, readFile, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { initializeTestEnvironment } from "@firebase/rules-unit-testing";
@@ -31,7 +38,6 @@ import { initializeTestEnvironment } from "@firebase/rules-unit-testing";
 const E2E_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(E2E_DIR, "../..");
 const RULES = path.join(ROOT, "firestore.rules");
-const FIREBASE_JSON = path.join(E2E_DIR, "firebase.json");
 
 const PORT = Number(process.env.GP_E2E_FIRESTORE_PORT || 8081);
 const HOST = "127.0.0.1";
@@ -54,7 +60,7 @@ const MIME = {
   ".woff2": "font/woff2",
 };
 
-let emulator, server, env, baseUrl;
+let emulator, server, env, baseUrl, tempConfigDir;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -70,16 +76,27 @@ async function waitForEmulator(timeoutMs = 120000) {
   throw new Error(`Firestore emulator did not start on ${HOST}:${PORT}`);
 }
 
+/** Write a throwaway firebase.json whose Firestore port is the active PORT. */
+function emulatorConfig() {
+  tempConfigDir = mkdtempSync(path.join(os.tmpdir(), "gatepass-e2e-"));
+  const file = path.join(tempConfigDir, "firebase.json");
+  writeFileSync(file, JSON.stringify({
+    emulators: { firestore: { host: HOST, port: PORT } },
+  }, null, 2));
+  return file;
+}
+
 async function startEmulator() {
   if (process.env.GP_E2E_EMULATOR === "0") {
+    // Reuse mode: no config is needed, but every connection still uses PORT.
     await waitForEmulator();
     return;
   }
   emulator = spawn("firebase", [
     "emulators:start", "--only", "firestore",
-    "--project", PROJECT, "--config", FIREBASE_JSON,
+    "--project", PROJECT, "--config", emulatorConfig(),
   ], {
-    cwd: E2E_DIR, shell: true, stdio: ["ignore", "pipe", "pipe"],
+    cwd: tempConfigDir, shell: true, stdio: ["ignore", "pipe", "pipe"],
   });
   let log = "";
   emulator.stdout.on("data", (d) => { log += d; });
@@ -184,20 +201,25 @@ async function makeContext(browser) {
 
   await context.route("**/assets/js/firebase.js", async (route) => {
     const response = await route.fetch();
-    let body = await response.text();
-    const original = body;
-    body = body.replace(
-      /serverTimestamp,\s*increment,\s*onSnapshot,\s*\} from "firebase\/firestore";/,
-      'serverTimestamp, increment, onSnapshot, connectFirestoreEmulator,\n} from "firebase/firestore";'
-    );
-    body = body.replace(
-      /export const db = app \? getFirestore\(app\) : null;/,
-      `export const db = app ? (() => { const d = getFirestore(app); connectFirestoreEmulator(d, "${HOST}", ${PORT}); return d; })() : null;`
-    );
-    if (body === original || !body.includes("connectFirestoreEmulator")) {
-      throw new Error("Could not inject the Firestore emulator hook into assets/js/firebase.js");
+    const body = await response.text();
+
+    const importPattern = /serverTimestamp,\s*increment,\s*onSnapshot,\s*\} from "firebase\/firestore";/;
+    const dbPattern = /export const db = app \? getFirestore\(app\) : null;/;
+    const importReplacement = 'serverTimestamp, increment, onSnapshot, connectFirestoreEmulator,\n} from "firebase/firestore";';
+    const dbReplacement = `export const db = app ? (() => { const d = getFirestore(app); connectFirestoreEmulator(d, "${HOST}", ${PORT}); return d; })() : null;`;
+
+    const haveImport = importPattern.test(body);
+    const haveDb = dbPattern.test(body);
+    if (!haveImport || !haveDb) {
+      throw new Error(
+        `Unexpected assets/js/firebase.js shape: import hook found=${haveImport}, db hook found=${haveDb}`
+      );
     }
-    await route.fulfill({ response, body, contentType: "text/javascript; charset=utf-8" });
+    const patched = body.replace(importPattern, importReplacement).replace(dbPattern, dbReplacement);
+    if (importPattern.test(patched) || dbPattern.test(patched) || !patched.includes(dbReplacement)) {
+      throw new Error("Emulator hook replacement did not apply cleanly to assets/js/firebase.js");
+    }
+    await route.fulfill({ response, body: patched, contentType: "text/javascript; charset=utf-8" });
   });
   return context;
 }
@@ -226,6 +248,8 @@ test.describe("duplicate scan across two gate phones", () => {
       projectId: PROJECT,
       firestore: { rules: readFileSync(RULES, "utf8"), host: HOST, port: PORT },
     });
+    // A claim left by an earlier run would turn the first scan into a duplicate.
+    await env.clearFirestore();
     await seed();
   }, 180000);
 
@@ -236,6 +260,7 @@ test.describe("duplicate scan across two gate phones", () => {
     }
     if (server) await new Promise((r) => server.close(r));
     stopEmulator();
+    if (tempConfigDir) rmSync(tempConfigDir, { recursive: true, force: true });
   });
 
   test("first scan is green, every repeat is red and increments bounced", async ({ browser }) => {

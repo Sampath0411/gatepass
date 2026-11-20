@@ -18,13 +18,14 @@ reuse an emulator that is already running on that port.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
-from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -33,7 +34,9 @@ from playwright.sync_api import expect, sync_playwright
 E2E_DIR = Path(__file__).resolve().parent
 ROOT = E2E_DIR.parent.parent
 RULES = ROOT / "firestore.rules"
-FIREBASE_JSON = E2E_DIR / "firebase.json"
+# tests/e2e/firebase.json is the default-8081 reference. The emulator config
+# actually used below is generated at runtime with the active PORT.
+TEMP_DIR = None
 
 PORT = int(os.environ.get("GP_E2E_FIRESTORE_PORT", "8081"))
 HOST = "127.0.0.1"
@@ -116,13 +119,20 @@ def wait_for_emulator(timeout=120):
 
 
 def start_emulator():
+    global TEMP_DIR
     if os.environ.get("GP_E2E_EMULATOR") == "0":
+        # Reuse mode: no config is needed, but every connection still uses PORT.
         wait_for_emulator()
         return None
+    TEMP_DIR = tempfile.mkdtemp(prefix="gatepass-e2e-")
+    config = Path(TEMP_DIR) / "firebase.json"
+    config.write_text(json.dumps({
+        "emulators": {"firestore": {"host": HOST, "port": PORT}},
+    }, indent=2), encoding="utf-8")
     args = ["firebase", "emulators:start", "--only", "firestore",
-            "--project", PROJECT, "--config", str(FIREBASE_JSON)]
+            "--project", PROJECT, "--config", str(config)]
     proc = subprocess.Popen(
-        subprocess.list2cmdline(args), cwd=str(E2E_DIR), shell=True,
+        subprocess.list2cmdline(args), cwd=TEMP_DIR, shell=True,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     try:
@@ -292,6 +302,8 @@ def main():
         server.shutdown()
         server.server_close()
         stop_emulator(emulator)
+        if TEMP_DIR:
+            shutil.rmtree(TEMP_DIR, ignore_errors=True)
 
 
 if __name__ == "__main__":

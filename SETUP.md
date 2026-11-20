@@ -17,16 +17,16 @@ The duplicate-scan test seeds one event and one pass in a local emulator on port
 ```sh
 # Node / Playwright — run from tests/ so Node resolves the local package
 cd tests
-npm install
-npm install --no-save @playwright/test
+npm ci
 npx playwright install chromium
-npx playwright test e2e/duplicate-scan.spec.js
+npm run test:e2e
+# or: npx playwright test e2e/duplicate-scan.spec.js
 
 # Python Playwright fallback (uses the already-installed system Python package)
 python tests/e2e/duplicate_scan.py
 ```
 
-Run the Node command from `tests/`: if you run `npx playwright` from the repo root while dependencies only exist in `tests/`, npx loads a second copy of Playwright and the runner rejects the test file. To use the root-level form `npx playwright test tests/e2e/duplicate-scan.spec.js`, install Playwright at the repo root too.
+Run the Node command from `tests/`, not from the repo root. With dependencies installed only in `tests/`, a root-level `npx playwright test tests/e2e/duplicate-scan.spec.js` makes npx load a second copy of Playwright and the runner rejects the test file. To use that root-level form, Playwright must also be installed at the repo root.
 
 Both start their own emulator and static server. Set `GP_E2E_FIRESTORE_PORT` to change the port, or `GP_E2E_EMULATOR=0` to reuse an emulator already running there.
 

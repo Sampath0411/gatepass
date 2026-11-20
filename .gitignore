@@ -15,3 +15,9 @@ Thumbs.db
 PRODUCT.md
 DESIGN.md
 DESIGN.json
+
+# E2E test artifacts
+tests/e2e/firebase-debug.log
+tests/e2e/firestore-debug.log
+tests/test-results/
+tests/playwright-report/
