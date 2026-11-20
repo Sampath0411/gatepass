@@ -19,7 +19,7 @@ Made by [@souradip.sh](https://www.instagram.com/souradip.sh/).
 
 | Who | What they do | Account? |
 |---|---|---|
-| **Organiser** | Signs in (Google on the hosted copy; email magic link and/or Google on your own copy), creates the event, uploads the registrations CSV (or pastes rows from Google Sheets). Gets one pass per row and copies or exports every link to send on WhatsApp or email. Watches "Checked in N / total" live. | Yes |
+| **Organiser** | Signs in with Google, creates the event, uploads the registrations CSV (or pastes rows from Google Sheets). Gets one pass per row and copies or exports every link to send on WhatsApp or email. Watches "Checked in N / total" live. | Yes |
 | **Attendee** | Opens their link and shows the ticket at the gate. A screenshot works too, once. | No |
 | **Gate staff** | Open `/gate/`, type the event's 8-character gate code, pick a gate name and point the camera at passes. "Find by name" covers dead phones. | No |
 
@@ -27,37 +27,37 @@ GatePass sends no email or messages itself. Each pass row has WhatsApp / email /
 
 ### Why a screenshot only works once
 
-Every pass has a 32-character random token (192 bits), so links can't be guessed. When a gate scans a pass, one database function does a single `INSERT … ON CONFLICT DO NOTHING` into `gp_scans`, guarded by a unique index that allows **one** accepted scan per pass (`gp_scans_first_once`). If two gates scan the same pass in the same millisecond, Postgres lets exactly one of them in; the other gets the first scan's time and gate back and shows red. Repeat attempts are logged, so the organiser sees "3 repeat scans bounced at the gate".
+Every pass has a 32-character random token (192 bits), so links can't be guessed. When a gate scans a pass, Firestore runs a transaction that writes a **claim** to `gp_gates/{code}/claims/{passId}` — and the document ID **is** the pass ID, so there can be exactly one claim per pass. Security Rules independently refuse a second create at that path. If two gates scan the same pass in the same millisecond, only one claim can exist: the other scan gets the first scan's time and gate back and shows red. Repeat attempts are logged under that claim, so the organiser sees "3 repeat scans bounced at the gate".
 
 ### Security model
 
-- **Row Level Security** is on for every table. Organisers can only read and change their own events, passes and scans.
-- **Attendees** read their pass through `gp_pass(token)`, which returns that one pass (name, event, check-in time) and never the contact details or anyone else's pass.
-- **Gate staff** hold the event's gate code. Every staff action (`gp_gate_join`, `gp_scan`, `gp_gate_find`, `gp_gate_admit`, `gp_gate_stats`) is a `SECURITY DEFINER` function that checks the code first. The code has 31⁸ ≈ 850 billion combinations, and the organiser can replace it with one tap ("New code"); the old one stops working immediately. Staff search shows masked contacts only (`an•••@gmail.com`, `•••3210`).
-- Only the **anon key** is in `config.js`. It's designed to be public; never put the `service_role` key in this repo.
+- **Firestore Security Rules** guard every collection. Organisers can only read and change their own data; event data lives in owner-scoped subcollections (`gp_users/{uid}/events`, `gp_events/{eventId}/passes`, and the gate's `roster`/`claims`). The gate code is never stored in a document an attendee can read.
+- **Attendees** need no account. They read their pass from `gp_passes/{token}`, where the 32-character token (192 bits) is the document ID and the capability. It returns just that one pass (name, event, check-in time) and never contact details or anyone else's pass.
+- **Gate staff** need no account either. The 8-character gate code is a path segment (`gp_gates/{code}`) acting as the capability — 31⁸ ≈ 850 billion combinations — and Rules only allow reading a gate doc that already exists, so codes can't be enumerated. The organiser can replace the code with one tap ("New code") and the old one stops working immediately. Staff search shows masked contacts only (`an•••@gmail.com`, `•••3210`).
+- **One-shot claims** live at `gp_gates/{code}/claims/{passId}`; the document ID makes each claim unique and Security Rules enforce a single create.
+- Only the **public web config** is in `firebase-config.js`. It's designed to be shared; no service-account keys or secrets ever go in this repo.
 
 ---
 
 ## Host your own copy (free, 5 steps)
 
-You need a free [Supabase](https://supabase.com) account and a GitHub account (or Netlify / Vercel).
+You need a free [Firebase](https://firebase.google.com) account and a GitHub account (or Netlify / Vercel / Firebase Hosting). The console walkthrough is in [`SETUP.md`](SETUP.md); the short version:
 
-1. **Create a Supabase project.** supabase.com → New project. Any region close to your college (Mumbai `ap-south-1` for most of India). Save the database password somewhere; GatePass never needs it.
-2. **Run the schema.** In the project, open **SQL Editor → New query**, paste the whole of [`schema.sql`](schema.sql), and press **Run**. It creates three tables, their security rules and the scan functions, all prefixed `gp_`. It's safe to run again, and safe in a project that already has other tables.
-3. **Put your keys in `config.js`.** Fork this repo, then edit [`config.js`](config.js): set `supabaseUrl` and `supabaseAnonKey` from **Project Settings → API** (Project URL, and the `anon` `public` key). Pick the organiser sign-in: `emailSignIn: true` for the email magic link (works out of the box on a new project), and `googleSignIn: true` only after you set up Google in **Authentication → Providers**. The hosted copy ships with Google only.
+1. **Create a Firebase project.** console.firebase.google.com → **Add project**. Google Analytics is optional. Enable **Firestore Database** in production mode and pick a region close to your college.
+2. **Turn on Google sign-in.** **Authentication → Sign-in method → Google**, set a support email, and add your deployed site's domain under **Authentication → Settings → Authorised domains**. The hosted copy uses Google only.
+3. **Publish the rules and config.** Deploy [`firestore.rules`](firestore.rules) and [`firestore.indexes.json`](firestore.indexes.json) (Firebase CLI `firebase deploy --only firestore:rules,firestore:indexes`, or paste the rules into the Rules tab). Fork this repo and copy your web app config into [`firebase-config.js`](firebase-config.js) — **Project settings → Your apps → SDK setup and configuration**.
 4. **Publish the site.**
    - **GitHub Pages:** in your fork, **Settings → Pages → Build and deployment → Deploy from a branch → `main` / `(root)`**. Your site appears at `https://<you>.github.io/gatepass/`.
    - **Netlify / Vercel:** import the repo. There is no build command; the publish directory is the repo root.
-5. **Tell Supabase where the site lives.** **Authentication → URL Configuration**: set **Site URL** to your site's address and add it under **Redirect URLs** too (for example `https://<you>.github.io/gatepass/**`). Without this, sign-in links bounce to `localhost`. **Authentication → Providers → Email** must be enabled (it is by default).
-
-Open your site, sign in, make an event, and do a test scan with two phones.
+   - **Firebase Hosting:** `firebase deploy --only hosting` with the repo root as the public directory.
+5. **Test it.** Sign in with Google, make an event, upload a small CSV, and do a test scan with two phones before the real event.
 
 ### Free-tier notes
 
-- **Projects pause after about a week with no activity.** A paused project can't load passes or scan. Open your Supabase dashboard and press **Restore project** (takes a minute or two). Do a test scan the day before your event so nothing is asleep at the gate.
-- **Sign-in emails:** Supabase's built-in mailer is for testing. It sends only a few emails per hour, and on newer projects only to members of your Supabase team. For more organisers, add custom SMTP (Authentication → Emails → SMTP; [Resend](https://resend.com) has a free tier) or turn on Google sign-in (Authentication → Providers → Google).
-- **Size:** the free 500 MB database holds millions of passes; a fest of 5,000 people uses well under 5 MB.
-- **Realtime:** the organiser's live counter uses Supabase Realtime (free tier: 200 concurrent connections). Gate phones poll every 5 seconds instead, so they never count against it.
+- **No pausing.** Firestore on the free Spark plan doesn't go to sleep, so passes and scans work whenever your event is — no "restore project" the morning of the fest. A quick test scan the day before is still a good idea.
+- **Google sign-in, no mailer limits.** Organisers sign in with their Google account, so GatePass sends no sign-in email — no mail quota, SMTP setup or "team members only" restriction to worry about.
+- **Size:** the free Firestore plan holds far more than a fest needs; 5,000 people uses just a few MB.
+- **Realtime:** the organiser's live counter and the gate phones' counts use Firestore realtime listeners (`onSnapshot`), all within the free plan.
 
 ---
 
@@ -77,16 +77,25 @@ Event details, each attendee's name and the one contact column you choose (email
 ## Files
 
 ```
-index.html          organiser app (sign-in, events, passes, gate code, live counter)
-p/index.html        the attendee's pass, at p/#<token>
-gate/index.html     the gate scanner
-config.js           your Supabase URL + anon key (the only file you edit)
-schema.sql          tables, RLS, scan functions (all gp_*)
-assets/             css, js modules, fonts, poster art, textures
-vendor/             supabase-js, jsQR, qrcode-generator (see vendor/LICENSES.md)
+index.html              organiser app (sign-in, events, passes, gate code, live counter)
+p/index.html            the attendee's pass, at p/#<token>
+gate/index.html         the gate scanner
+firebase-config.js      your Firebase web app config (the only file you edit)
+assets/js/firebase.js   Firebase Auth + Firestore data layer (transactions, rules-friendly paths)
+assets/js/core.js       shared helpers, formatting, state
+assets/js/organiser.js  organiser dashboard
+assets/js/gate.js       gate scanner UI
+assets/js/pass.js       attendee pass page
+assets/js/csv.js        CSV / Google Sheets parsing
+assets/js/scanner.js    camera + QR decoding
+firestore.rules         who can read/write each collection
+firestore.indexes.json  Firestore indexes
+SETUP.md                Firebase console setup, step by step
+assets/                 css, js modules, fonts, poster art, textures
+vendor/                 jsQR, qrcode-generator (see vendor/LICENSES.md)
 ```
 
-Plain HTML, CSS and JavaScript modules. No build step and nothing to install. To run it locally: `python -m http.server 8000` in the repo folder, then open http://localhost:8000 (add `http://localhost:8000/**` to Supabase's Redirect URLs).
+Plain HTML, CSS and JavaScript modules. No build step and nothing to install. To run it locally: `python -m http.server 8000` in the repo folder, then open http://localhost:8000. Firebase Auth needs your site's domain listed under **Authorised domains** (add `localhost` for local testing); Firestore needs no allow-list — the Security Rules travel with the project.
 
 ## Licence
 
