@@ -1,7 +1,7 @@
 // Organiser app: sign in, events, registrations → passes, links, gate code, live counter.
 import {
   configured, ART, artUrl, passUrl, gateUrl, fmtCode, fmtWhen, fmtTime, fmtDay, esc, plural,
-  store, copyText, toast, download, qrSvg, I, paintIcons, DB_MSG, escT, typo,
+  copyText, toast, download, qrSvg, I, paintIcons, DB_MSG, escT, typo,
 } from "./core.js";
 import * as fb from "./firebase.js";
 import { parseTable, analyse, toPasses, toCsv, isEmail, isPhone } from "./csv.js";
@@ -18,11 +18,11 @@ const MAX_ROWS = 5000;
 function notConfigured() {
   view.innerHTML = `
     <section class="stack narrow">
-      <div class="poster hero-poster" id="art"><h1 class="poster-title ink">Almost there</h1><p class="poster-club">Connect your Supabase project</p></div>
+      <div class="poster hero-poster" id="art"><h1 class="poster-title ink">Almost there</h1><p class="poster-club">Connect your Firebase project</p></div>
       <ol class="sub" style="padding-left:20px;margin:6px 0 0;display:grid;gap:6px">
-        <li>Create a free project at supabase.com.</li>
-        <li>Run <b>schema.sql</b> in its SQL editor.</li>
-        <li>Put the project URL and anon key in <b>config.js</b>.</li>
+        <li>Create a free project at console.firebase.google.com.</li>
+        <li>Enable Firestore and Google sign-in (see <b>SETUP.md</b>).</li>
+        <li>Put your web config in <b>firebase-config.js</b>.</li>
       </ol>
       <a class="btn" href="https://github.com/Souradip121/gatepass#host-your-own-copy-free-5-steps" rel="noopener">Read the 5-step guide ${I.open}</a>
     </section>`;
@@ -46,7 +46,6 @@ async function boot() {
 function route() {
   stopLive();
   const h = location.hash || "";
-  if (/access_token|error_description|refresh_token/.test(h)) return; // the SDK is still reading a sign-in link
   if (route.last !== undefined && route.last !== h) window.scrollTo(0, 0);
   route.last = h;
   if (!session) return signInView();
@@ -60,7 +59,8 @@ function route() {
 
 function fail(e) {
   const msg = e?.message || String(e);
-  const paused = /fetch|network|Failed to fetch|5\d\d/.test(msg) ? DB_MSG + " Or check your connection." : msg;
+  const signature = `${e?.code || ""} ${msg}`;
+  const paused = /unavailable|deadline-exceeded|network|fetch|5\d\d/.test(signature) ? DB_MSG + " Or check your connection." : msg;
   view.innerHTML = `<section class="empty"><h3>Something broke</h3><p class="sub">${esc(paused)}</p><p style="margin-top:14px"><button class="btn small" type="button" onclick="location.reload()">${I.refresh}Try again</button></p></section>`;
 }
 
@@ -215,17 +215,18 @@ async function eventForm(id = null) {
 
 async function eventView(id) {
   view.innerHTML = `<div class="skeleton" style="height:520px"></div>`;
-  let ev, passes, gate;
+  let ev, passes, gate, claims = [];
   try {
     ev = await fb.getEvent(id);
     if (!ev) { toast("That event isn't yours or was deleted", "x"); location.hash = ""; return; }
     passes = await fb.getPasses(id);
     gate = await fb.joinGate(ev.gate_code);
   } catch (e) { return fail(e); }
+  try { claims = await fb.getClaims(ev.gate_code); } catch {}
 
   passes.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.name.localeCompare(b.name));
-  const state = { ev, passes, first: new Map(), bounced: 0, checked: gate.counts.checked, upload: null, filter: "", shown: 120 };
-  state.first = new Map(); state.bounced = gate.counts.bounced; state.checked = gate.counts.checked;
+  const state = { ev, passes, first: new Map(), bounced: gate?.counts.bounced ?? 0, checked: gate?.counts.checked ?? 0, upload: null, filter: "", shown: 120 };
+  for (const claim of claims) if (claim.is_first) state.first.set(claim.pass_id, claim);
 
   document.title = `${typo(ev.name)} · GatePass`;
   view.innerHTML = `
@@ -434,9 +435,9 @@ function renderGate(state, showQr = false) {
       b.disabled = false;
       return toast(e.message || "Couldn't change the code", "x");
     }
-    if (!data) { b.disabled = false; return toast("Couldn't change the code", "x"); }
     ev.gate_code = data;
     renderGate(state, showQr);
+    startLive(state);
     toast("New gate code. Staff need to re-join.");
   });
 }
@@ -525,6 +526,9 @@ function startLive(state) {
   const onStats = (e) => {
     const c = e.detail?.counts;
     if (!c || e.detail.badCode) return;
+    for (const item of e.detail.recent || []) {
+      if (item.passId && item.is_first) state.first.set(item.passId, { pass_id: item.passId, scanned_at: item.at, gate: item.gate, is_first: true });
+    }
     const changed = c.checked !== state.checked || c.bounced !== state.bounced;
     state.checked = c.checked;
     state.bounced = c.bounced;
