@@ -88,7 +88,7 @@ service cloud.firestore {
         && (isOwner(request.resource.data.eventId) || request.resource.data.scannedAt == request.time)
         && request.resource.data.keys().hasOnly(['eventId', 'token', 'name', 'gate', 'device', 'scannedAt'])
         && request.resource.data.keys().hasAll(['eventId', 'token', 'name', 'gate', 'device', 'scannedAt']);
-      allow update: if false;
+      allow update: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
       allow delete: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
     }
 
@@ -98,7 +98,7 @@ service cloud.firestore {
         && (isOwner(request.resource.data.eventId) || request.resource.data.scannedAt == request.time)
         && request.resource.data.keys().hasOnly(['eventId', 'gate', 'device', 'scannedAt'])
         && request.resource.data.keys().hasAll(['eventId', 'gate', 'device', 'scannedAt']);
-      allow update: if false;
+      allow update: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
       allow delete: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
     }
   }
