@@ -1,5 +1,6 @@
 // Gate scanner. Staff hold the event's gate code; every call is a code-checked RPC.
-import { configured, rpc, esc, typo, fmtTime, fmtCode, store, I, paintIcons, plural, PAUSED_MSG } from "./core.js";
+import { configured, esc, typo, fmtTime, fmtCode, store, I, paintIcons, plural, DB_MSG } from "./core.js";
+import * as fb from "./firebase.js";
 import { Camera, decode, tokenFrom } from "./scanner.js";
 
 const $ = (id) => document.getElementById(id);
@@ -8,7 +9,7 @@ const S = {
   code: null, gate: "Gate 1", event: null,
   device: store.get("gp.device") || Math.random().toString(36).slice(2, 10),
   last: { token: null, seen: 0, text: null, textSeen: 0 },
-  busy: false, statsTimer: null, loopOn: false,
+  busy: false, loopOn: false,
 };
 store.set("gp.device", S.device);
 paintIcons();
@@ -96,12 +97,14 @@ function showResult(r) {
 async function scanToken(token) {
   S.busy = true;
   try {
-    showResult(await rpc("gp_scan", { p_code: S.code, p_token: token, p_gate: S.gate, p_device: S.device }));
+    const r = await fb.scanToken(S.code, token, S.gate, S.device);
+    if (r.status === "bad_code") { sounds.warn(); return leave("The organiser changed this gate's code. Ask them for the new one."); }
+    showResult(r);
   } catch (e) {
     sounds.warn();
-    verdict("warn", e.offline ? "No connection" : e.paused ? "Database asleep" : "Couldn't check that pass",
-      e.offline ? "Not checked. Don't let them in until a scan goes green." : esc(e.paused ? PAUSED_MSG : e.message));
-    S.last.token = null; // allow an immediate retry
+    verdict("warn", /unavailable|network|deadline/i.test(e.code || "") ? "No connection" : "Couldn't check that pass",
+      /unavailable|network|deadline/i.test(e.code || "") ? "Not checked. Don't let them in until a scan goes green." : esc(e.message));
+    S.last.token = null;
   } finally {
     S.busy = false;
   }
@@ -126,20 +129,22 @@ async function handleText(text) {
 window.GatePassGate = { handleText }; // handy for testing in the console
 
 // ── stats ──
-async function loadStats() {
+function loadStats() {
   if (!S.code) return;
-  try {
-    const st = await rpc("gp_gate_stats", { p_code: S.code });
-    if (!st) return leave("The organiser changed this gate's code. Ask them for the new one.");
-    setCounts(st.counts);
-    $("recent").innerHTML = st.recent.length ? st.recent.map((r) => `
-      <li>
-        <span class="${r.is_first ? "r-ok" : "r-dup"}">${r.is_first ? I.check : I.x}</span>
-        <span class="r-name">${esc(r.name)}</span>
-        <span class="r-at">${r.is_first ? "" : "repeat · "}${esc(r.gate)} · ${esc(fmtTime(r.scanned_at))}</span>
-      </li>`).join("") : `<li><span class="r-at">Nobody scanned yet.</span></li>`;
-  } catch {}
+  fb.gateStats(S.code);
 }
+window.addEventListener("gp-stats", (e) => {
+  const d = e.detail;
+  if (!d) return;
+  if (d.badCode) return leave("The organiser changed this gate's code. Ask them for the new one.");
+  setCounts(d.counts);
+  $("recent").innerHTML = d.recent.length ? d.recent.map((r) => `
+    <li>
+      <span class="${r.is_first ? "r-ok" : "r-dup"}">${r.is_first ? I.check : I.x}</span>
+      <span class="r-name">${esc(r.name)}</span>
+      <span class="r-at">${r.is_first ? "" : "repeat · "}${esc(r.gate)} · ${esc(fmtTime(r.at))}</span>
+    </li>`).join("") : `<li><span class="r-at">Nobody scanned yet.</span></li>`;
+});
 
 // ── camera ──
 const cam = new Camera($("video"));
@@ -227,7 +232,7 @@ function openFind() {
       const mine = ++seq;
       if (q.value.trim().length < 2) { list.innerHTML = ""; return; }
       let rows = [];
-      try { rows = await rpc("gp_gate_find", { p_code: S.code, p_query: q.value }); } catch { list.innerHTML = `<li><p class="err">Couldn't search. Check your connection.</p></li>`; return; }
+      try { rows = await fb.gateFind(S.code, q.value); } catch { list.innerHTML = `<li><p class="err">Couldn't search. Check your connection.</p></li>`; return; }
       if (mine !== seq) return;
       list.innerHTML = rows.length ? rows.map((r) => `
         <li>
@@ -242,7 +247,11 @@ function openFind() {
     if (!b) return;
     b.disabled = true;
     close();
-    try { showResult(await rpc("gp_gate_admit", { p_code: S.code, p_pass: b.dataset.id, p_gate: S.gate, p_device: S.device })); }
+    try {
+      const r = await fb.admitById(S.code, b.dataset.id, S.gate, S.device);
+      if (r.status === "bad_code") { sounds.warn(); leave("The organiser changed this gate's code. Ask them for the new one."); }
+      else showResult(r);
+    }
     catch (err) { verdict("warn", "Couldn't check them in", err.offline ? "No connection." : esc(err.message)); }
   });
 }
@@ -254,7 +263,7 @@ function showJoin(msg = "") {
   err.textContent = msg; err.hidden = !msg;
 }
 function leave(msg = "") {
-  cam.stop(); clearInterval(S.statsTimer);
+  cam.stop(); fb.stopStats();
   S.code = null; store.del("gp.gate");
   showJoin(msg);
 }
@@ -268,15 +277,13 @@ function showScanner() {
   setCounts(S.event.counts);
   idle();
   loadStats();
-  clearInterval(S.statsTimer);
-  S.statsTimer = setInterval(() => { if (document.visibilityState === "visible") loadStats(); }, 5000);
 }
 
 async function join(code, gate, { auto = false } = {}) {
   const btn = $("joinBtn");
   btn.disabled = true;
   try {
-    const ev = await rpc("gp_gate_join", { p_code: code });
+    const ev = await fb.joinGate(code);
     if (!ev) { if (auto) store.del("gp.gate"); return showJoin(auto ? "" : "No event has that code. Check it with the organiser; they may have made a new one."); }
     S.code = code.replace(/[^A-Za-z0-9]/g, "").toUpperCase(); S.gate = gate; S.event = ev;
     store.set("gp.gate", { code: S.code, gate });
@@ -285,7 +292,7 @@ async function join(code, gate, { auto = false } = {}) {
     if (!auto || perm?.state === "granted") startCamera();
     else camMessage("Ready", "Tap to turn on the camera.", "Start camera");
   } catch (e) {
-    showJoin(e.offline ? "No connection. Connect and try again." : e.paused ? PAUSED_MSG : e.message);
+    showJoin(e.offline ? "No connection. Connect and try again." : e.paused ? DB_MSG : e.message);
   } finally {
     btn.disabled = false;
   }
@@ -309,7 +316,7 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 
 // ── boot ──
 (function boot() {
-  if (!configured) { showJoin("This copy of GatePass has no Supabase project in config.js yet."); return; }
+  if (!configured || !fb.configured) { showJoin("This copy of GatePass has no Supabase project in config.js yet."); return; }
   const fromHash = (location.hash || "").replace(/^#\/?/, "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
   const saved = store.get("gp.gate");
   if (fromHash.length === 8) {
