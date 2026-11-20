@@ -420,7 +420,8 @@ export async function scanToken(code, token, gateName, device) {
         checked: increment(1),
         recent: [recent[0], ...(g.data().recent || [])].slice(0, 6),
       });
-      return { status: "ok", name: p.data().name, scanned_at: at, counts: countsOf(g.data()) };
+      return { status: "ok", name: p.data().name, scanned_at: at,
+        counts: { ...countsOf(g.data()), checked: (g.data().checked || 0) + 1 } };
     }
 
     tx.set(doc(collection(db, GATES, code, "claims", p.data().id, "repeats")), {
@@ -440,7 +441,7 @@ export async function scanToken(code, token, gateName, device) {
       first_at: firstAt, first_gate: firstGate,
       same_device: firstDevice === device && !!device,
       repeats: (g.data().bounced || 0) + 1,
-      counts: countsOf(g.data()),
+      counts: { ...countsOf(g.data()), bounced: (g.data().bounced || 0) + 1 },
     };
   });
   return result;
@@ -456,8 +457,10 @@ export async function admitById(code, passId, gateName, device) {
   try {
     r = await getDoc(doc(db, GATES, code, "roster", passId));
   } catch (e) {
-    // Rules deny reads under a nonexistent/rotated gate code.
-    if (e.code === "permission-denied") return { status: "unknown" };
+    // Rules deny reads under a nonexistent/rotated gate code; surface that as bad_code
+    // so the gate UI reacts the same way it does for an invalid gate code. A genuinely
+    // missing roster doc for a valid code still returns unknown via the !exists() path.
+    if (e.code === "permission-denied") return { status: "bad_code" };
     throw e;
   }
   if (!r.exists()) return { status: "unknown" };
