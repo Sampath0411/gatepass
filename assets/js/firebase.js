@@ -91,22 +91,25 @@ export async function createEvent(row) {
 }
 
 export async function updateEvent(id, row) {
-  await updateDoc(doc(db, COL, id), {
-    name: row.name, club: row.club, venue: row.venue, art: row.art,
-    startsAt: new Date(row.starts_at),
-  });
-  const ue = doc(db, "gp_users", auth.currentUser.uid, "events", id);
-  if ((await getDoc(ue)).exists()) {
-    await updateDoc(ue, { name: row.name, startsAt: new Date(row.starts_at) });
-  }
   const ev = await getDoc(doc(db, COL, id));
-  const gate = await getDoc(doc(db, GATES, ev.data().gateCode));
+  const gateCode = ev.data().gateCode;
+  const gate = await getDoc(doc(db, GATES, gateCode));
+  const startsAt = new Date(row.starts_at);
+  const batch = writeBatch(db);
+  batch.update(doc(db, COL, id), {
+    name: row.name, club: row.club, venue: row.venue, art: row.art,
+    startsAt,
+  });
+  batch.set(doc(db, "gp_users", auth.currentUser.uid, "events", id), {
+    name: row.name, startsAt,
+  });
   if (gate.exists()) {
-    await updateDoc(gate.ref, {
+    batch.update(gate.ref, {
       name: row.name, club: row.club, venue: row.venue, art: row.art,
-      startsAt: new Date(row.starts_at),
+      startsAt,
     });
   }
+  await batch.commit();
 }
 
 export async function deleteEvent(id) {
@@ -121,19 +124,24 @@ export async function deleteEvent(id) {
     const reps = await getDocs(collection(db, GATES, code, "claims", c.id, "repeats"));
     repeatRefs.push(...reps.docs.map((d) => d.ref));
   }
-  const refs = [
-    doc(db, COL, id),
-    doc(db, "gp_users", auth.currentUser.uid, "events", id),
-    doc(db, GATES, code),
+  const childRefs = [
     ...passes.docs.map((d) => d.ref),
     ...roster.docs.map((d) => d.ref),
     ...claims.docs.map((d) => d.ref),
     ...repeatRefs,
     ...passes.docs.map((d) => doc(db, PASS_PUB, d.data().token)),
   ];
-  for (let i = 0; i < refs.length; i += 400) {
+  const parentRefs = [
+    doc(db, COL, id),
+    doc(db, "gp_users", auth.currentUser.uid, "events", id),
+    doc(db, GATES, code),
+  ];
+  for (let i = 0; i < childRefs.length; i += 400) {
     const batch = writeBatch(db);
-    refs.slice(i, i + 400).forEach((r) => batch.delete(r));
+    childRefs.slice(i, i + 400).forEach((r) => batch.delete(r));
     await batch.commit();
   }
+  const finalBatch = writeBatch(db);
+  parentRefs.forEach((r) => finalBatch.delete(r));
+  await finalBatch.commit();
 }
