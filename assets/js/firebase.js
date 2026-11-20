@@ -208,44 +208,61 @@ export async function rotateCode(eventId, oldCode) {
   // Read the event once up front so we never start a migration against a stale code.
   const ev = await getDoc(evRef);
   if (!ev.exists() || ev.data().gateCode !== oldCode) throw new Error("Code changed");
-  const next = newCode();
+  const evData = ev.data();
+  // Reuse a pending target code on retry: newCode() must only run on the first
+  // attempt, otherwise a failed retry would strand claims under a random code.
+  const next = evData.pendingCode || newCode();
 
   // Read the old gate and all of its data while the old gate doc still exists —
   // rules gate these reads on that doc's existence.
   const oldGate = await getDoc(doc(db, GATES, oldCode));
   if (!oldGate.exists()) throw new Error("Old gate doc missing");
   const g = oldGate.data();
+
+  // First attempt: durably record the chosen target code and pre-create its gate
+  // doc. Subcollection writes below authorize by looking up a gate doc at the code
+  // in the path, so both gate docs must coexist until the final transaction.
+  // On a retry the pendingCode/new gate already exist, so this is skipped.
+  if (!evData.pendingCode) {
+    await runTransaction(db, async (tx) => {
+      const fresh = await tx.get(evRef);
+      if (!fresh.exists() || fresh.data().gateCode !== oldCode) throw new Error("Code changed");
+      tx.update(evRef, { pendingCode: next });
+      tx.set(doc(db, GATES, next), {
+        eventId, name: g.name, club: g.club || "", venue: g.venue || "", art: g.art || 0,
+        startsAt: g.startsAt, total: g.total || 0, checked: g.checked || 0,
+        bounced: g.bounced || 0, recent: g.recent || [],
+      });
+    });
+  }
+
+  // COPY ONLY — never delete anything under oldCode. Every write below is a set
+  // under next, so an interrupted migration leaves the ACTIVE old gate fully
+  // intact and a retry simply overwrites the partially-created new-code docs.
   const roster = await getDocs(collection(db, GATES, oldCode, "roster"));
   const rows = roster.docs.map((d) => ({ id: d.id, data: d.data() }));
   const claimSnap = await getDocs(collection(db, GATES, oldCode, "claims"));
   const claims = [];
   for (const c of claimSnap.docs) {
     const reps = await getDocs(collection(db, GATES, oldCode, "claims", c.id, "repeats"));
-    claims.push({ id: c.id, data: c.data(), repeats: reps.docs.map((r) => r.data()) });
+    claims.push({
+      id: c.id, data: c.data(),
+      // Preserve the original repeat IDs so retries overwrite instead of duplicating.
+      repeats: reps.docs.map((d) => ({ id: d.id, data: d.data() })),
+    });
   }
 
-  // Create the new gate doc FIRST (a plain setDoc is permitted for an owner before
-  // the event is repointed). Subcollection writes below authorize by looking up a
-  // gate doc at the code in the path, so both gate docs must coexist until the end.
-  await setDoc(doc(db, GATES, next), {
-    eventId, name: g.name, club: g.club || "", venue: g.venue || "", art: g.art || 0,
-    startsAt: g.startsAt, total: g.total || 0, checked: g.checked || 0,
-    bounced: g.bounced || 0, recent: g.recent || [],
-  });
-
-  // Roster: two ops per row (set under next, delete under oldCode) — cap at 480.
   for (let i = 0; i < rows.length; i += 240) {
     const batch = writeBatch(db);
     for (const r of rows.slice(i, i + 240)) {
       batch.set(doc(db, GATES, next, "roster", r.id), r.data);
-      batch.delete(doc(db, GATES, oldCode, "roster", r.id));
     }
     await batch.commit();
   }
 
-  // Claims and repeats: each claim contributes a set + delete plus one set per
-  // repeat. Keep a claim's ops together where possible, but cap every batch at
-  // 480 total ops and at most 240 repeat writes so nothing hits the 500-op limit.
+  // Claims and repeats: one claim set plus one set per repeat. Keep a claim's ops
+  // together where possible, but cap every batch at 480 total ops and at most 240
+  // repeat writes so nothing hits the 500-op limit.
   let batch = writeBatch(db), count = 0, repeats = 0;
   async function flush() {
     if (!count) return;
@@ -255,27 +272,26 @@ export async function rotateCode(eventId, oldCode) {
     repeats = 0;
   }
   for (const c of claims) {
-    const need = 2 + c.repeats.length;
+    const need = 1 + c.repeats.length;
     if (count && (count + need > 480 || repeats + c.repeats.length > 240)) await flush();
     batch.set(doc(db, GATES, next, "claims", c.id), c.data);
-    batch.delete(doc(db, GATES, oldCode, "claims", c.id));
-    count += 2;
+    count++;
     for (const r of c.repeats) {
       if (repeats >= 240) await flush();   // a single oversized claim
-      batch.set(doc(collection(db, GATES, next, "claims", c.id, "repeats")), r);
+      batch.set(doc(db, GATES, next, "claims", c.id, "repeats", r.id), r.data);
       count++;
       repeats++;
     }
   }
   await flush();
 
-  // ONLY NOW, with all data migrated, repoint the event and remove the old gate.
-  // Any earlier failure leaves the event on oldCode with the old gate intact, so
-  // a retry safely overwrites the partially-created newCode documents.
+  // ONLY NOW, with all data copied, repoint the event and remove the old gate doc.
+  // We do NOT delete the old subcollections: once the old gate doc is gone, rules
+  // deny those deletes anyway, and the orphaned docs are unreadable and harmless.
   await runTransaction(db, async (tx) => {
     const fresh = await tx.get(evRef);
     if (!fresh.exists() || fresh.data().gateCode !== oldCode) throw new Error("Code changed");
-    tx.update(evRef, { gateCode: next });
+    tx.update(evRef, { gateCode: next, pendingCode: null });
     tx.delete(doc(db, GATES, oldCode));
   });
   return next;
