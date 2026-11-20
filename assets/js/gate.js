@@ -135,6 +135,7 @@ function loadStats() {
   fb.gateStats(S.code);
 }
 window.addEventListener("gp-stats", (e) => {
+  if (!S.code) return;
   const d = e.detail;
   if (!d) return;
   if (d.badCode) return leave("The organiser changed this gate's code. Ask them for the new one.");
@@ -296,7 +297,7 @@ async function join(code, gate, { auto = false } = {}) {
     if (!auto || perm?.state === "granted") startCamera();
     else camMessage("Ready", "Tap to turn on the camera.", "Start camera");
   } catch (e) {
-    showJoin(isOffline(e) ? "No connection. Connect and try again." : esc(e.message));
+    showJoin(isOffline(e) ? "No connection. Connect and try again." : e.message);
   } finally {
     btn.disabled = false;
   }
