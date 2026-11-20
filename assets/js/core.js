@@ -1,9 +1,9 @@
 // Shared helpers for every GatePass page.
 import qrcode from "../../vendor/qrcode.mjs";
 
-export const cfg = window.GATEPASS || {};
 export const ROOT = new URL("../../", import.meta.url);            // the site root, wherever it is hosted
-export const configured = !!(cfg.supabaseUrl && cfg.supabaseAnonKey && !/YOUR_|PLACEHOLDER/.test(cfg.supabaseUrl + cfg.supabaseAnonKey));
+export const DB_MSG = "The database is temporarily unavailable. Try again in a moment.";
+export const configured = !!(window.FIREBASE && window.FIREBASE.apiKey && window.FIREBASE.projectId && window.FIREBASE.appId);
 
 export const ART = [
   { key: "crowd", name: "Crowd" },
@@ -17,40 +17,6 @@ export const artUrl = (i, thumb = false) => new URL(`assets/art/${thumb ? "thumb
 export const passUrl = (token) => new URL(`p/#${token}`, ROOT).href;
 export const gateUrl = (code) => new URL(`gate/#${code}`, ROOT).href;
 export const fmtCode = (c = "") => (c.length === 8 ? `${c.slice(0, 4)}-${c.slice(4)}` : c);
-
-// ── Supabase RPC over plain fetch (pass + gate pages don't need the SDK) ──
-export class RpcError extends Error {}
-export async function rpc(fn, args = {}, { token, signal } = {}) {
-  let res;
-  try {
-    res = await fetch(`${cfg.supabaseUrl}/rest/v1/rpc/${fn}`, {
-      method: "POST",
-      headers: {
-        apikey: cfg.supabaseAnonKey,
-        Authorization: `Bearer ${token || cfg.supabaseAnonKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(args),
-      signal,
-      cache: "no-store",
-    });
-  } catch (e) {
-    const err = new RpcError("offline");
-    err.offline = true;
-    throw err;
-  }
-  const text = await res.text();
-  if (!res.ok) {
-    let msg = text;
-    try { msg = JSON.parse(text).message || text; } catch {}
-    const err = new RpcError(msg);
-    err.status = res.status;
-    // A paused free-tier project answers 5xx / 540 until it wakes up.
-    err.paused = res.status >= 500;
-    throw err;
-  }
-  return text ? JSON.parse(text) : null;
-}
 
 // ── formatting ──
 const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -185,9 +151,6 @@ export const I = {
 export function setArt(el, i, thumb = false) {
   el.style.backgroundImage = `url("${artUrl(i, thumb)}")`;
 }
-
-// One message for a free-tier project that went to sleep.
-export const PAUSED_MSG = "The database is asleep (free Supabase projects pause after a week idle). The organiser can restore it from the Supabase dashboard.";
 
 // Fill <span data-i="name"></span> placeholders with their icon.
 export function paintIcons(root = document) {
