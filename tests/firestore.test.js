@@ -1,4 +1,4 @@
-import { test, before, after } from "node:test";
+import { test, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { initializeTestEnvironment, assertSucceeds, assertFails } from "@firebase/rules-unit-testing";
@@ -6,6 +6,7 @@ import { serverTimestamp } from "firebase/firestore";
 
 const PROJECT = "gatepass-test", OWNER = "owner-uid", OTHER = "other-uid";
 const EVENT = "event-1", CODE = "ABCD2345", TOKEN = "A".repeat(32), PASS = "pass-1";
+const REPEAT = `gp_gates/${CODE}/claims/${PASS}/repeats/repeat-1`;
 let env;
 
 const seed = () => env.withSecurityRulesDisabled(async (ctx) => {
@@ -25,12 +26,27 @@ const seedClaim = () => env.withSecurityRulesDisabled(async (ctx) => {
   });
 });
 
+// An extra pass; the eventId can be overridden to build binding-mismatch cases.
+const seedPass = (token, passId, eventId = EVENT) => env.withSecurityRulesDisabled(async (ctx) => {
+  await ctx.firestore().doc(`gp_passes/${token}`).set({
+    id: passId, eventId, name: "Ada", checkedInAt: null, gate: "",
+  });
+});
+
+const seedRepeat = () => env.withSecurityRulesDisabled(async (ctx) => {
+  await ctx.firestore().doc(REPEAT).set({
+    eventId: EVENT, gate: "Gate 1", device: "dev", scannedAt: new Date(),
+  });
+});
+
 before(async () => {
   env = await initializeTestEnvironment({
     projectId: PROJECT,
     firestore: { rules: readFileSync(new URL("../firestore.rules", import.meta.url), "utf8"), host: "127.0.0.1", port: 8080 },
   });
 });
+beforeEach(async () => await seed());
+afterEach(async () => env.clearFirestore());
 after(async () => { await env.clearFirestore(); await env.cleanup(); });
 
 const as = (uid) => (uid ? env.authenticatedContext(uid) : env.unauthenticatedContext()).firestore();
@@ -38,29 +54,26 @@ const claim = () => ({
   eventId: EVENT, token: TOKEN, name: "Ada", gate: "Gate 1", device: "dev",
   scannedAt: serverTimestamp(),
 });
+const repeat = () => ({ eventId: EVENT, gate: "Gate 1", device: "dev", scannedAt: serverTimestamp() });
 
 // ---- Base harness tests (1-12) ----
 
 test("1. owner reads own event, another user cannot", async () => {
-  await seed();
   await assertSucceeds(as(OWNER).doc(`gp_events/${EVENT}`).get());
   await assertFails(as(OTHER).doc(`gp_events/${EVENT}`).get());
 });
 
 test("2. unauthenticated user cannot list gp_events (owner can list user index)", async () => {
-  await seed();
   await assertFails(as(null).collection("gp_events").get());
   await assertSucceeds(as(OWNER).collection(`gp_users/${OWNER}/events`).get());
 });
 
 test("3. token is a read capability but collection list is denied", async () => {
-  await seed();
   await assertSucceeds(as(null).doc(`gp_passes/${TOKEN}`).get());
   await assertFails(as(null).collection("gp_passes").get());
 });
 
 test("4. contact is absent from public pass, present in owner subcollection", async () => {
-  await seed();
   const pub = await as(null).doc(`gp_passes/${TOKEN}`).get();
   assert.equal(pub.data().contact, undefined);
   const priv = await as(OWNER).doc(`gp_events/${EVENT}/passes/${PASS}`).get();
@@ -68,48 +81,40 @@ test("4. contact is absent from public pass, present in owner subcollection", as
 });
 
 test("5. first claim create succeeds with a valid code", async () => {
-  await seed();
   await assertSucceeds(as(null).doc(`gp_gates/${CODE}/claims/${PASS}`).set(claim()));
 });
 
-test("6. second claim create for the same pass is denied", async () => {
-  await seed();
+test("6. staff cannot overwrite an existing claim via set()", async () => {
   await seedClaim();
   await assertFails(as(null).doc(`gp_gates/${CODE}/claims/${PASS}`).set(claim()));
 });
 
 test("7. claim create under an unknown code is denied", async () => {
-  await seed();
   await assertFails(as(null).doc(`gp_gates/UNKNOWNCODE/claims/${PASS}`).set(claim()));
 });
 
 test("8. claim cannot be updated or deleted by staff", async () => {
-  await seed();
   await seedClaim();
   await assertFails(as(null).doc(`gp_gates/${CODE}/claims/${PASS}`).update({ gate: "Hacked" }));
   await assertFails(as(null).doc(`gp_gates/${CODE}/claims/${PASS}`).delete());
 });
 
 test("9. gate staff may update only counters/recent on gp_gates (checked succeeds, name fails; also total fails)", async () => {
-  await seed();
   await assertSucceeds(as(null).doc(`gp_gates/${CODE}`).update({ checked: 1 }));
   await assertFails(as(null).doc(`gp_gates/${CODE}`).update({ name: "X" }));
   await assertFails(as(null).doc(`gp_gates/${CODE}`).update({ total: 2 }));
 });
 
 test("10. gate staff cannot change the gate doc's eventId", async () => {
-  await seed();
   await assertFails(as(null).doc(`gp_gates/${CODE}`).update({ eventId: "other-event" }));
 });
 
 test("11. roster is readable by code but not writable by staff", async () => {
-  await seed();
   await assertSucceeds(as(null).doc(`gp_gates/${CODE}/roster/${PASS}`).get());
   await assertFails(as(null).doc(`gp_gates/${CODE}/roster/${PASS}`).update({ name: "X" }));
 });
 
 test("12. old code stops working after rotation (get nonexistent code fails)", async () => {
-  await seed();
   await env.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
     await db.doc(`gp_gates/NEWCODE1`).set({ eventId: EVENT, total: 1, checked: 0, bounced: 0, recent: [] });
@@ -121,14 +126,7 @@ test("12. old code stops working after rotation (get nonexistent code fails)", a
 
 // ---- Additional tests for the tightened/extended rules (13-16) ----
 
-const seedPass = (token, passId) => env.withSecurityRulesDisabled(async (ctx) => {
-  await ctx.firestore().doc(`gp_passes/${token}`).set({
-    id: passId, eventId: EVENT, name: "Ada", checkedInAt: null, gate: "",
-  });
-});
-
 test("13. backdated scannedAt: staff denied, owner allowed, different user denied", async () => {
-  await seed();
   const backdated = new Date("2020-01-01");
   const T2 = "B".repeat(32), P2 = "pass-2";
   const T3 = "C".repeat(32), P3 = "pass-3";
@@ -146,14 +144,12 @@ test("13. backdated scannedAt: staff denied, owner allowed, different user denie
 });
 
 test("14. owner can update an existing claim under their gate; staff cannot", async () => {
-  await seed();
   await seedClaim();
   await assertSucceeds(as(OWNER).doc(`gp_gates/${CODE}/claims/${PASS}`).update({ gate: "Gate 2" }));
   await assertFails(as(OTHER).doc(`gp_gates/${CODE}/claims/${PASS}`).update({ gate: "Gate 3" }));
 });
 
 test("15. owner can pre-create a gate doc for an existing event (rotation pre-create); others cannot", async () => {
-  await seed();
   const gate = { eventId: EVENT, total: 0, checked: 0, bounced: 0, recent: [] };
   await assertSucceeds(as(OWNER).doc(`gp_gates/NEWCODE2`).set(gate));
   await assertFails(as(OTHER).doc(`gp_gates/NEWCODE2b`).set(gate));
@@ -161,7 +157,66 @@ test("15. owner can pre-create a gate doc for an existing event (rotation pre-cr
 });
 
 test("16. staff get on an existing gate code succeeds; get on a deleted/unknown code fails", async () => {
-  await seed();
   await assertSucceeds(as(OTHER).doc(`gp_gates/${CODE}`).get());
   await assertFails(as(OTHER).doc(`gp_gates/NO_SUCH_CODE`).get());
+});
+
+// ---- Repeats rules (17-22) ----
+
+test("17. staff may create a repeat with a server timestamp and exactly the allowed keys", async () => {
+  await seedClaim();
+  await assertSucceeds(as(null).doc(REPEAT).set(repeat()));
+});
+
+test("18. staff repeat create with a backdated scannedAt is denied", async () => {
+  await seedClaim();
+  await assertFails(as(null).doc(REPEAT).set({ ...repeat(), scannedAt: new Date("2020-01-01") }));
+});
+
+test("19. owner repeat create with a backdated scannedAt is allowed", async () => {
+  await seedClaim();
+  await assertSucceeds(as(OWNER).doc(REPEAT).set({ ...repeat(), scannedAt: new Date("2020-01-01") }));
+});
+
+test("20. repeat create with an extra field is denied", async () => {
+  await seedClaim();
+  await assertFails(as(null).doc(REPEAT).set({ ...repeat(), extra: "nope" }));
+});
+
+test("21. staff cannot update or delete an existing repeat", async () => {
+  await seedClaim();
+  await seedRepeat();
+  await assertFails(as(null).doc(REPEAT).update({ gate: "Gate 2" }));
+  await assertFails(as(null).doc(REPEAT).delete());
+});
+
+test("22. owner can update and delete an existing repeat", async () => {
+  await seedClaim();
+  await seedRepeat();
+  await assertSucceeds(as(OWNER).doc(REPEAT).update({ gate: "Gate 2" }));
+  await assertSucceeds(as(OWNER).doc(REPEAT).delete());
+});
+
+// ---- Claim binding negatives (23-24) ----
+
+test("23. claim create denied when the token's pass id does not match the claim passId", async () => {
+  const badToken = "E".repeat(32);
+  await seedPass(badToken, "pass-wrong");
+  await assertFails(as(null).doc(`gp_gates/${CODE}/claims/${PASS}`).set({ ...claim(), token: badToken }));
+});
+
+test("24. claim create denied when the pass belongs to a different event than the gate", async () => {
+  const badToken = "F".repeat(32);
+  await seedPass(badToken, PASS, "event-2");
+  await assertFails(as(null).doc(`gp_gates/${CODE}/claims/${PASS}`).set({ ...claim(), token: badToken, eventId: EVENT }));
+});
+
+// ---- Positive staff stamp writes (25-26) ----
+
+test("25. unauthenticated staff may write only the stamp fields on a pass", async () => {
+  await assertSucceeds(as(null).doc(`gp_passes/${TOKEN}`).update({ checkedInAt: new Date(), gate: "Gate 1" }));
+});
+
+test("26. unauthenticated staff may write only the stamp fields on a roster entry", async () => {
+  await assertSucceeds(as(null).doc(`gp_gates/${CODE}/roster/${PASS}`).update({ checkedInAt: new Date(), gate: "Gate 1" }));
 });
