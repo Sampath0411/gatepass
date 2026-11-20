@@ -22,8 +22,9 @@ Port GatePass from Supabase to Firebase (Auth + Firestore + Security Rules) with
 |---|---|---|---|
 | `gp_events` | auto ID | `ownerId`, `name`, `club`, `venue`, `art`, `startsAt`, `gateCode`, `createdAt` | owner CRUD only |
 | `gp_gates` | 8-char gate code | `eventId`, `checked`, `bounced` | `get` if the doc exists (code capability); `list` denied; writes validate code against event |
-| `gp_passes` | 32-char token | `id` (pass ID), `eventId`, `name`, `event` (display snapshot), `checkedInAt`, `gate` | `get` by token capability; `list`/writes owner only |
-| `gp_private` | pass ID | `token`, `eventId`, `name`, `contact` | owner only |
+| `gp_passes` | 32-char token | `id` (pass ID), `eventId`, `name`, `event` (display snapshot), `checkedInAt`, `gate` | `get` by token capability; `list` denied; writes owner only |
+| `gp_users/{uid}/events` | event ID | Minimal index (`name`, `startsAt`) for the organiser's event list | `uid == auth.uid` only (path-scoped) |
+| `gp_events/{eventId}/passes` | pass ID | Full pass data incl. `contact`, for the organiser | owner only (path-scoped) |
 | `gp_claims` | pass ID | `eventId`, `token`, `name`, `gate`, `device`, `scannedAt`, `code` | `create` with gate validation; no `update`/`delete`; owner may read |
 | `gp_claims/{passId}/repeats` | auto ID | `eventId`, `gate`, `device`, `scannedAt`, `code` | `create` with gate validation; owner may read |
 | `gp_gates/{code}/roster` | pass ID | `name`, `hint` (masked contact), `token`, `checkedInAt`, `gate` | read by code capability; written by owner |
@@ -45,8 +46,8 @@ Helper predicates:
 Rules summary:
 
 - `gp_events`: all reads/writes require `isOwner(eventId)`; create additionally requires `ownerId == request.auth.uid`.
-- `gp_passes`: `allow get: if true` (unguessable token is the capability); `list` and all writes require `isOwner(eventId)`; `contact` is never stored here.
-- `gp_private`: owner only.
+- `gp_passes`: `allow get: if true` (unguessable token is the capability); `list` denied; writes require `isOwner(eventId)`; `contact` is never stored here.
+- `gp_users/{uid}/events` and `gp_events/{eventId}/passes`: owner-only via the path segment (`uid == request.auth.uid` / `isOwner(eventId)`). Using path-scoped subcollections avoids depending on query-inspection rules.
 - `gp_gates`: `get` allowed when the doc exists (the code in the path is the capability); `list` denied; create and delete require `isOwner(eventId)`. Owner may update any field. Unauthenticated gate staff may update only `checked`/`bounced`, with `eventId` unchanged and no other keys changed.
 - `gp_claims/{passId}`: `create` only if `validGate(request.resource.data.code, request.resource.data.eventId)`, `passMatches(...)`, `!exists(...)`, and `request.resource.data.scannedAt == request.time`. The client writes `scannedAt` with `serverTimestamp()` — during rules evaluation a server timestamp equals `request.time`, so this forbids backdating. No `update`/`delete`. `read` for owner.
 - `gp_claims/{passId}/repeats/{id}`: `create` only if `validGate(code, eventId)`; `read` for owner.
@@ -86,6 +87,8 @@ Remove Supabase-specific `PAUSED_MSG` ("database asleep") — Firebase projects 
 - **Edited** `assets/js/organiser.js`, `gate.js`, `pass.js` — replace data-layer calls only; keep all UI code.
 - **Edited** `README.md` — Firebase setup instructions.
 - **Removed** `vendor/supabase.js`, `schema.sql`, `config.js` (replaced by `firebase-config.js`).
+
+Pass generation writes two documents per pass: a public `gp_passes/{token}` projection and a full `gp_events/{eventId}/passes/{passId}` document. Event creation also writes `gp_users/{uid}/events/{eventId}` and `gp_gates/{code}`.
 
 ## Testing (dev-only; shipped site stays build-free)
 
