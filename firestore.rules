@@ -41,9 +41,14 @@ service cloud.firestore {
       allow get: if exists(/databases/$(database)/documents/gp_gates/$(code));
       allow list: if false;
       allow create: if signedIn()
-        && existsAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId))
-        && getAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId)).data.ownerId == request.auth.uid
-        && getAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId)).data.gateCode == code;
+        && (
+          (existsAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId))
+            && getAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId)).data.ownerId == request.auth.uid
+            && getAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId)).data.gateCode == code)
+          ||
+          (exists(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId))
+            && get(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId)).data.ownerId == request.auth.uid)
+        );
       allow delete: if isOwner(resource.data.eventId);
       allow update: if isOwner(resource.data.eventId)
         || (resource.data.eventId == request.resource.data.eventId
