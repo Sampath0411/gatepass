@@ -139,14 +139,14 @@ service cloud.firestore {
 
     // The code in the path is the capability; no client can enumerate codes.
     match /gp_gates/{code} {
-      allow get: if true;
+      allow get: if exists(/databases/$(database)/documents/gp_gates/$(code));
       allow list: if false;
       allow create: if isOwner(request.resource.data.eventId);
       allow delete: if isOwner(resource.data.eventId);
       allow update: if isOwner(resource.data.eventId)
         || (resource.data.eventId == request.resource.data.eventId
             && request.resource.data.diff(resource.data).affectedKeys()
-                 .hasOnly(['total', 'checked', 'bounced', 'recent']));
+                 .hasOnly(['checked', 'bounced', 'recent']));
     }
 
     match /gp_gates/{code}/roster/{passId} {
@@ -178,7 +178,9 @@ service cloud.firestore {
       allow create: if !exists(/databases/$(database)/documents/gp_gates/$(code)/claims/$(passId))
         && get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId == request.resource.data.eventId
         && passMatches(request.resource.data.token, passId, request.resource.data.eventId)
-        && request.resource.data.scannedAt == request.time;
+        && request.resource.data.scannedAt == request.time
+        && request.resource.data.keys().hasOnly(['eventId', 'token', 'name', 'gate', 'device', 'scannedAt'])
+        && request.resource.data.keys().hasAll(['eventId', 'token', 'name', 'gate', 'device', 'scannedAt']);
       allow update: if false;
       allow delete: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
     }
@@ -186,7 +188,9 @@ service cloud.firestore {
     match /gp_gates/{code}/claims/{passId}/repeats/{rid} {
       allow read: if exists(/databases/$(database)/documents/gp_gates/$(code));
       allow create: if get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId == request.resource.data.eventId
-        && request.resource.data.scannedAt == request.time;
+        && request.resource.data.scannedAt == request.time
+        && request.resource.data.keys().hasOnly(['eventId', 'gate', 'device', 'scannedAt'])
+        && request.resource.data.keys().hasAll(['eventId', 'gate', 'device', 'scannedAt']);
       allow update: if false;
       allow delete: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
     }
