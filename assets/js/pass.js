@@ -1,5 +1,6 @@
-// The attendee's pass. Public at /p/#<token>; reads only its own pass through gp_pass().
-import { configured, rpc, esc, escT, typo, fmtWhen, fmtTime, qrSvg, setArt, passUrl, copyText, toast, I, ROOT, PAUSED_MSG } from "./core.js";
+// The attendee's pass. Public at /p/#<token>; reads only its own public pass document.
+import { configured, esc, escT, typo, fmtWhen, fmtTime, qrSvg, setArt, passUrl, copyText, toast, I, ROOT, DB_MSG } from "./core.js";
+import * as fb from "./firebase.js";
 
 const view = document.getElementById("view");
 const token = decodeURIComponent((location.hash || "").replace(/^#\/?/, "")).trim();
@@ -14,17 +15,14 @@ function missing(title, body) {
 }
 
 async function load() {
-  if (!configured) return missing("Not set up yet", "This copy of GatePass has no Supabase project in <code>config.js</code>.");
+  if (!configured || !fb.configured) return missing("Not set up yet", "This copy of GatePass has no Firebase project configured yet.");
   if (!/^[A-Za-z0-9_-]{32,}$/.test(token)) {
     return missing("No pass here", "This link is incomplete. Open the whole link from your message again, or ask the organiser to resend it.");
   }
   let p;
-  try {
-    p = await rpc("gp_pass", { p_token: token });
-  } catch (e) {
-    if (e.offline) return missing("You're offline", "Connect to the internet once to load your pass. After that, a screenshot works at the gate too (once).");
-    if (e.paused) return missing("Back in a minute", esc(PAUSED_MSG));
-    return missing("Couldn't load", esc(e.message));
+  try { p = await fb.getPassByToken(token); }
+  catch (e) {
+    return missing("Couldn't load", esc(/unavailable|network|deadline/i.test(e.code || "") ? DB_MSG : e.message));
   }
   if (!p) return missing("No pass here", "This pass doesn't exist or the event was deleted. Ask the organiser to resend your link.");
   render(p);
