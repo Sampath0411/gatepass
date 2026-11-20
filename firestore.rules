@@ -80,7 +80,7 @@ service cloud.firestore {
       allow create: if !exists(/databases/$(database)/documents/gp_gates/$(code)/claims/$(passId))
         && get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId == request.resource.data.eventId
         && passMatches(request.resource.data.token, passId, request.resource.data.eventId)
-        && request.resource.data.scannedAt == request.time
+        && (isOwner(request.resource.data.eventId) || request.resource.data.scannedAt == request.time)
         && request.resource.data.keys().hasOnly(['eventId', 'token', 'name', 'gate', 'device', 'scannedAt'])
         && request.resource.data.keys().hasAll(['eventId', 'token', 'name', 'gate', 'device', 'scannedAt']);
       allow update: if false;
@@ -90,7 +90,7 @@ service cloud.firestore {
     match /gp_gates/{code}/claims/{passId}/repeats/{rid} {
       allow read: if exists(/databases/$(database)/documents/gp_gates/$(code));
       allow create: if get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId == request.resource.data.eventId
-        && request.resource.data.scannedAt == request.time
+        && (isOwner(request.resource.data.eventId) || request.resource.data.scannedAt == request.time)
         && request.resource.data.keys().hasOnly(['eventId', 'gate', 'device', 'scannedAt'])
         && request.resource.data.keys().hasAll(['eventId', 'gate', 'device', 'scannedAt']);
       allow update: if false;
