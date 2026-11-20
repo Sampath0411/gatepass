@@ -406,7 +406,7 @@ export async function scanToken(code, token, gateName, device) {
     const claimRef = doc(db, GATES, code, "claims", p.data().id);
     const existing = await tx.get(claimRef);
     const at = new Date().toISOString();
-    const recent = [{ name: p.data().name, gate: gateName, is_first: !existing.exists(), at }];
+    const recent = [{ name: p.data().name, passId: p.data().id, gate: gateName, is_first: !existing.exists(), at }];
 
     if (!existing.exists()) {
       tx.set(claimRef, {
@@ -465,4 +465,22 @@ export async function admitById(code, passId, gateName, device) {
   }
   if (!r.exists()) return { status: "unknown" };
   return scanToken(code, r.data().token, gateName, device);
+}
+
+export async function getClaims(code) {
+  let snap;
+  try {
+    snap = await getDocs(collection(db, GATES, code, "claims"));
+  } catch (e) {
+    // Rules deny reads under a nonexistent/rotated gate code.
+    if (e.code === "permission-denied") return [];
+    throw e;
+  }
+  return snap.docs.map((d) => {
+    const c = d.data();
+    return {
+      pass_id: d.id, is_first: true, gate: c.gate || "",
+      scanned_at: stamp(c.scannedAt),
+    };
+  });
 }
