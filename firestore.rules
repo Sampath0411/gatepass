@@ -1,0 +1,93 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function eventData(eventId) {
+      return get(/databases/$(database)/documents/gp_events/$(eventId)).data;
+    }
+
+    function isOwner(eventId) {
+      return signedIn() && eventData(eventId).ownerId == request.auth.uid;
+    }
+
+    function passMatches(token, passId, eventId) {
+      return token is string
+        && get(/databases/$(database)/documents/gp_passes/$(token)).data.id == passId
+        && get(/databases/$(database)/documents/gp_passes/$(token)).data.eventId == eventId;
+    }
+
+    // Organiser's event list index — scoped by uid so no query rules are needed.
+    match /gp_users/{uid}/events/{eventId} {
+      allow read, create, update, delete: if signedIn() && uid == request.auth.uid;
+    }
+
+    match /gp_events/{eventId} {
+      allow get: if isOwner(eventId);
+      allow list: if false;
+      allow create: if signedIn() && request.resource.data.ownerId == request.auth.uid;
+      allow update, delete: if isOwner(eventId);
+    }
+
+    match /gp_events/{eventId}/passes/{passId} {
+      allow read, create, update, delete: if isOwner(eventId);
+    }
+
+    // The code in the path is the capability; no client can enumerate codes.
+    match /gp_gates/{code} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if isOwner(request.resource.data.eventId);
+      allow delete: if isOwner(resource.data.eventId);
+      allow update: if isOwner(resource.data.eventId)
+        || (resource.data.eventId == request.resource.data.eventId
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['total', 'checked', 'bounced', 'recent']));
+    }
+
+    match /gp_gates/{code}/roster/{passId} {
+      allow read: if exists(/databases/$(database)/documents/gp_gates/$(code));
+      allow create, delete: if isOwner(
+        get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
+      allow update: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId)
+        || (exists(/databases/$(database)/documents/gp_gates/$(code))
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['checkedInAt', 'gate']));
+    }
+
+    // Attendee pass: the 32-char token is the doc ID and the capability.
+    match /gp_passes/{token} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if isOwner(request.resource.data.eventId);
+      // Gate staff hold only the token (from the QR). They may flip the display
+      // stamp; the authoritative claim doc is still the one-shot gate.
+      allow update: if isOwner(resource.data.eventId)
+        || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['checkedInAt', 'gate']);
+      allow delete: if isOwner(resource.data.eventId);
+    }
+
+    // The one-shot claim lives under the gate code: the code is the read capability,
+    // so no gate code is ever stored in a document an attendee could read.
+    match /gp_gates/{code}/claims/{passId} {
+      allow read: if exists(/databases/$(database)/documents/gp_gates/$(code));
+      allow create: if !exists(/databases/$(database)/documents/gp_gates/$(code)/claims/$(passId))
+        && get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId == request.resource.data.eventId
+        && passMatches(request.resource.data.token, passId, request.resource.data.eventId)
+        && request.resource.data.scannedAt == request.time;
+      allow update: if false;
+      allow delete: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
+    }
+
+    match /gp_gates/{code}/claims/{passId}/repeats/{rid} {
+      allow read: if exists(/databases/$(database)/documents/gp_gates/$(code));
+      allow create: if get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId == request.resource.data.eventId
+        && request.resource.data.scannedAt == request.time;
+      allow update: if false;
+      allow delete: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
+    }
+  }
+}
