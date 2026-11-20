@@ -380,3 +380,86 @@ export async function gateFind(code, text) {
     };
   });
 }
+
+export async function scanToken(code, token, gateName, device) {
+  const gateRef = doc(db, GATES, code);
+  const passRef = doc(db, PASS_PUB, token);
+
+  let gateSnap;
+  try {
+    gateSnap = await getDoc(gateRef);
+  } catch (e) {
+    // Rules deny get on a nonexistent/rotated gate doc, so an invalid/rotated
+    // code surfaces as permission-denied rather than a clean miss.
+    if (e.code === "permission-denied") return { status: "bad_code" };
+    throw e;
+  }
+  if (!gateSnap.exists()) return { status: "bad_code" };
+  const passSnap = await getDoc(passRef);
+  if (!passSnap.exists()) return { status: "unknown" };
+  const pass = passSnap.data();
+  if (pass.eventId !== gateSnap.data().eventId) return { status: "wrong_event" };
+
+  const result = await runTransaction(db, async (tx) => {
+    const g = await tx.get(gateRef);
+    const p = await tx.get(passRef);
+    const claimRef = doc(db, GATES, code, "claims", p.data().id);
+    const existing = await tx.get(claimRef);
+    const at = new Date().toISOString();
+    const recent = [{ name: p.data().name, gate: gateName, is_first: !existing.exists(), at }];
+
+    if (!existing.exists()) {
+      tx.set(claimRef, {
+        eventId: g.data().eventId, token, name: p.data().name,
+        gate: gateName, device, scannedAt: serverTimestamp(),
+      });
+      tx.update(passRef, { checkedInAt: serverTimestamp(), gate: gateName });
+      tx.update(doc(db, GATES, code, "roster", p.data().id),
+        { checkedInAt: serverTimestamp(), gate: gateName });
+      tx.update(gateRef, {
+        checked: increment(1),
+        recent: [recent[0], ...(g.data().recent || [])].slice(0, 6),
+      });
+      return { status: "ok", name: p.data().name, scanned_at: at, counts: countsOf(g.data()) };
+    }
+
+    tx.set(doc(collection(db, GATES, code, "claims", p.data().id, "repeats")), {
+      eventId: g.data().eventId, gate: gateName, device, scannedAt: serverTimestamp(),
+    });
+    tx.update(gateRef, {
+      bounced: increment(1),
+      recent: [recent[0], ...(g.data().recent || [])].slice(0, 6),
+    });
+    // A serverTimestamp() written inside a transaction reads back as null, so take
+    // the first-scan time/gate from the public pass doc, which was committed earlier.
+    const firstAt = stamp(p.data().checkedInAt) || at;
+    const firstGate = p.data().gate || "";
+    const firstDevice = existing.data().device;
+    return {
+      status: "dup", name: p.data().name,
+      first_at: firstAt, first_gate: firstGate,
+      same_device: firstDevice === device && !!device,
+      repeats: (g.data().bounced || 0) + 1,
+      counts: countsOf(g.data()),
+    };
+  });
+  return result;
+}
+
+function countsOf(d) {
+  return { total: d.total || 0, checked: d.checked || 0, bounced: d.bounced || 0 };
+}
+
+export async function admitById(code, passId, gateName, device) {
+  // Read the token from the code-scoped roster; owner-only pass docs are not readable by staff.
+  let r;
+  try {
+    r = await getDoc(doc(db, GATES, code, "roster", passId));
+  } catch (e) {
+    // Rules deny reads under a nonexistent/rotated gate code.
+    if (e.code === "permission-denied") return { status: "unknown" };
+    throw e;
+  }
+  if (!r.exists()) return { status: "unknown" };
+  return scanToken(code, r.data().token, gateName, device);
+}
