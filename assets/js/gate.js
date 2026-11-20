@@ -1,5 +1,5 @@
-// Gate scanner. Staff hold the event's gate code; every call is a code-checked RPC.
-import { configured, esc, typo, fmtTime, fmtCode, store, I, paintIcons, plural, DB_MSG } from "./core.js";
+// Gate scanner. Staff hold the event's gate code; every call is code-checked against the gate.
+import { configured, esc, typo, fmtTime, fmtCode, store, I, paintIcons, plural } from "./core.js";
 import * as fb from "./firebase.js";
 import { Camera, decode, tokenFrom } from "./scanner.js";
 
@@ -61,6 +61,7 @@ function flash(kind) {
   f.classList.add("show");
 }
 const idle = () => verdict("idle", "Point the camera at a pass", "The first scan lets them in. Any repeat goes red on every phone.");
+const isOffline = (e) => /unavailable|deadline-exceeded|network/i.test(e.code || "");
 
 function setCounts(c) {
   if (!c) return;
@@ -252,7 +253,10 @@ function openFind() {
       if (r.status === "bad_code") { sounds.warn(); leave("The organiser changed this gate's code. Ask them for the new one."); }
       else showResult(r);
     }
-    catch (err) { verdict("warn", "Couldn't check them in", err.offline ? "No connection." : esc(err.message)); }
+    catch (err) {
+      const offline = isOffline(err);
+      verdict("warn", offline ? "No connection" : "Couldn't check them in", offline ? "No connection. Connect and try again." : esc(err.message));
+    }
   });
 }
 
@@ -292,7 +296,7 @@ async function join(code, gate, { auto = false } = {}) {
     if (!auto || perm?.state === "granted") startCamera();
     else camMessage("Ready", "Tap to turn on the camera.", "Start camera");
   } catch (e) {
-    showJoin(e.offline ? "No connection. Connect and try again." : e.paused ? DB_MSG : e.message);
+    showJoin(isOffline(e) ? "No connection. Connect and try again." : esc(e.message));
   } finally {
     btn.disabled = false;
   }
@@ -316,7 +320,7 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 
 // ── boot ──
 (function boot() {
-  if (!configured || !fb.configured) { showJoin("This copy of GatePass has no Supabase project in config.js yet."); return; }
+  if (!configured || !fb.configured) { showJoin("This copy of GatePass has no Firebase project configured yet."); return; }
   const fromHash = (location.hash || "").replace(/^#\/?/, "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
   const saved = store.get("gp.gate");
   if (fromHash.length === 8) {
