@@ -40,7 +40,10 @@ service cloud.firestore {
     match /gp_gates/{code} {
       allow get: if exists(/databases/$(database)/documents/gp_gates/$(code));
       allow list: if false;
-      allow create: if isOwner(request.resource.data.eventId);
+      allow create: if signedIn()
+        && existsAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId))
+        && getAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId)).data.ownerId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId)).data.gateCode == code;
       allow delete: if isOwner(resource.data.eventId);
       allow update: if isOwner(resource.data.eventId)
         || (resource.data.eventId == request.resource.data.eventId
