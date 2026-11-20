@@ -142,9 +142,14 @@ service cloud.firestore {
       allow get: if exists(/databases/$(database)/documents/gp_gates/$(code));
       allow list: if false;
       allow create: if signedIn()
-        && existsAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId))
-        && getAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId)).data.ownerId == request.auth.uid
-        && getAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId)).data.gateCode == code;
+        && (
+          (existsAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId))
+            && getAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId)).data.ownerId == request.auth.uid
+            && getAfter(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId)).data.gateCode == code)
+          ||
+          (exists(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId))
+            && get(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId)).data.ownerId == request.auth.uid)
+        );
       allow delete: if isOwner(resource.data.eventId);
       allow update: if isOwner(resource.data.eventId)
         || (resource.data.eventId == request.resource.data.eventId
@@ -181,20 +186,20 @@ service cloud.firestore {
       allow create: if !exists(/databases/$(database)/documents/gp_gates/$(code)/claims/$(passId))
         && get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId == request.resource.data.eventId
         && passMatches(request.resource.data.token, passId, request.resource.data.eventId)
-        && request.resource.data.scannedAt == request.time
+        && (isOwner(request.resource.data.eventId) || request.resource.data.scannedAt == request.time)
         && request.resource.data.keys().hasOnly(['eventId', 'token', 'name', 'gate', 'device', 'scannedAt'])
         && request.resource.data.keys().hasAll(['eventId', 'token', 'name', 'gate', 'device', 'scannedAt']);
-      allow update: if false;
+      allow update: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
       allow delete: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
     }
 
     match /gp_gates/{code}/claims/{passId}/repeats/{rid} {
       allow read: if exists(/databases/$(database)/documents/gp_gates/$(code));
       allow create: if get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId == request.resource.data.eventId
-        && request.resource.data.scannedAt == request.time
+        && (isOwner(request.resource.data.eventId) || request.resource.data.scannedAt == request.time)
         && request.resource.data.keys().hasOnly(['eventId', 'gate', 'device', 'scannedAt'])
         && request.resource.data.keys().hasAll(['eventId', 'gate', 'device', 'scannedAt']);
-      allow update: if false;
+      allow update: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
       allow delete: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
     }
   }
@@ -417,7 +422,7 @@ export async function getPasses(eventId) {
 export async function generatePasses(eventId, rows, eventSnapshot) {
   // Never persist the gate code in a publicly readable pass document.
   const { gateCode, ...publicEvent } = eventSnapshot;
-  for (let i = 0; i < rows.length; i += 400) {
+  for (let i = 0; i < rows.length; i += 160) {
     const batch = writeBatch(db);
     for (const p of rows.slice(i, i + 400)) {
       const passId = doc(collection(db, COL, eventId, "passes")).id;
@@ -435,8 +440,8 @@ export async function generatePasses(eventId, rows, eventSnapshot) {
         hint: mask(p.contact), token, checkedInAt: null, gate: "",
       });
     }
-    batch.update(doc(db, COL, eventId), { total: increment(rows.slice(i, i + 400).length) });
-    batch.update(doc(db, GATES, gateCode), { total: increment(rows.slice(i, i + 400).length) });
+    batch.update(doc(db, COL, eventId), { total: increment(rows.slice(i, i + 160).length) });
+    batch.update(doc(db, GATES, gateCode), { total: increment(rows.slice(i, i + 160).length) });
     await batch.commit();
   }
 }
@@ -467,53 +472,103 @@ export async function getPassByToken(token) {
 
 ```js
 export async function rotateCode(eventId, oldCode) {
-  const next = newCode();
-  // Read the roster while the old gate doc still exists — rules gate reads on its existence.
+  const evRef = doc(db, COL, eventId);
+  // Read the event once up front so we never start a migration against a stale code.
+  const ev = await getDoc(evRef);
+  if (!ev.exists() || ev.data().gateCode !== oldCode) throw new Error("Code changed");
+  const evData = ev.data();
+  // Reuse a pending target code on retry: newCode() must only run on the first
+  // attempt, otherwise a failed retry would strand claims under a random code.
+  const next = evData.pendingCode || newCode();
+
+  // Read the old gate and all of its data while the old gate doc still exists —
+  // rules gate these reads on that doc's existence.
+  const oldGate = await getDoc(doc(db, GATES, oldCode));
+  if (!oldGate.exists()) throw new Error("Old gate doc missing");
+  const g = oldGate.data();
+
+  // First attempt only: durably record the chosen target code. Both the initial
+  // guard and the transaction re-check that we're still on oldCode and that no
+  // other rotation has claimed this event with a pendingCode.
+  if (evData.gateCode === oldCode && !evData.pendingCode) {
+    await runTransaction(db, async (tx) => {
+      const fresh = await tx.get(evRef);
+      if (!fresh.exists() || fresh.data().gateCode !== oldCode || fresh.data().pendingCode) {
+        throw new Error("Code changed");
+      }
+      tx.update(evRef, { pendingCode: next });
+    });
+  }
+
+  // Refresh the target gate doc on EVERY attempt. Scans and edits on the old code
+  // may have advanced counters/metadata since a failed attempt, so a retry must
+  // converge on the current snapshot rather than keeping the first attempt's.
+  // Subcollection writes below authorize by looking up a gate doc at the code in
+  // the path, so both gate docs must coexist until the final transaction.
+  await setDoc(doc(db, GATES, next), {
+    eventId, name: g.name, club: g.club || "", venue: g.venue || "", art: g.art || 0,
+    startsAt: g.startsAt, total: g.total || 0, checked: g.checked || 0,
+    bounced: g.bounced || 0, recent: g.recent || [],
+  });
+
+  // COPY ONLY — never delete anything under oldCode. Every write below is a set
+  // under next, so an interrupted migration leaves the ACTIVE old gate fully
+  // intact and a retry simply overwrites the partially-created new-code docs.
   const roster = await getDocs(collection(db, GATES, oldCode, "roster"));
   const rows = roster.docs.map((d) => ({ id: d.id, data: d.data() }));
   const claimSnap = await getDocs(collection(db, GATES, oldCode, "claims"));
   const claims = [];
   for (const c of claimSnap.docs) {
     const reps = await getDocs(collection(db, GATES, oldCode, "claims", c.id, "repeats"));
-    claims.push({ id: c.id, data: c.data(), repeats: reps.docs.map((r) => r.data()) });
-  }
-  const evRef = doc(db, COL, eventId);
-
-  // ORDER MATTERS. Subcollection writes authorize by looking up a gate doc at the
-  // code in the path. Both gate docs must exist while we migrate, so delete the
-  // old gate doc LAST — otherwise the migration writes are denied and the claims
-  // are lost, which would let every pass be scanned as "first" again.
-  await runTransaction(db, async (tx) => {
-    const ev = await tx.get(evRef);
-    if (!ev.exists() || ev.data().gateCode !== oldCode) throw new Error("Code changed");
-    const oldGate = await tx.get(doc(db, GATES, oldCode));
-    tx.set(doc(db, GATES, next), {
-      eventId, total: oldGate.data().total || 0,
-      checked: oldGate.data().checked || 0, bounced: oldGate.data().bounced || 0,
-      recent: oldGate.data().recent || [],
+    claims.push({
+      id: c.id, data: c.data(),
+      // Preserve the original repeat IDs so retries overwrite instead of duplicating.
+      repeats: reps.docs.map((d) => ({ id: d.id, data: d.data() })),
     });
-    tx.update(evRef, { gateCode: next });
-    // no delete here
-  });
+  }
 
-  // Rewrite roster, claims and repeats under the new code, then remove old docs.
-  for (let i = 0; i < rows.length; i += 400) {
+  for (let i = 0; i < rows.length; i += 240) {
     const batch = writeBatch(db);
-    for (const r of rows.slice(i, i + 400)) {
+    for (const r of rows.slice(i, i + 240)) {
       batch.set(doc(db, GATES, next, "roster", r.id), r.data);
-      batch.delete(doc(db, GATES, oldCode, "roster", r.id));
     }
     await batch.commit();
   }
-  for (const c of claims) {
-    const batch = writeBatch(db);
-    batch.set(doc(db, GATES, next, "claims", c.id), c.data);
-    batch.delete(doc(db, GATES, oldCode, "claims", c.id));
-    for (const r of c.repeats) batch.set(doc(collection(db, GATES, next, "claims", c.id, "repeats")), r);
+
+  // Claims and repeats: one claim set plus one set per repeat. Keep a claim's ops
+  // together where possible, but cap every batch at 480 total ops and at most 240
+  // repeat writes so nothing hits the 500-op limit.
+  let batch = writeBatch(db), count = 0, repeats = 0;
+  async function flush() {
+    if (!count) return;
     await batch.commit();
+    batch = writeBatch(db);
+    count = 0;
+    repeats = 0;
   }
-  // Now that nothing points at the old code, remove it.
-  await deleteDoc(doc(db, GATES, oldCode));
+  for (const c of claims) {
+    const need = 1 + c.repeats.length;
+    if (count && (count + need > 480 || repeats + c.repeats.length > 240)) await flush();
+    batch.set(doc(db, GATES, next, "claims", c.id), c.data);
+    count++;
+    for (const r of c.repeats) {
+      if (repeats >= 240) await flush();   // a single oversized claim
+      batch.set(doc(db, GATES, next, "claims", c.id, "repeats", r.id), r.data);
+      count++;
+      repeats++;
+    }
+  }
+  await flush();
+
+  // ONLY NOW, with all data copied, repoint the event and remove the old gate doc.
+  // We do NOT delete the old subcollections: once the old gate doc is gone, rules
+  // deny those deletes anyway, and the orphaned docs are unreadable and harmless.
+  await runTransaction(db, async (tx) => {
+    const fresh = await tx.get(evRef);
+    if (!fresh.exists() || fresh.data().gateCode !== oldCode) throw new Error("Code changed");
+    tx.update(evRef, { gateCode: next, pendingCode: null });
+    tx.delete(doc(db, GATES, oldCode));
+  });
   return next;
 }
 ```
@@ -524,7 +579,15 @@ Note: `gp_gates/{code}` carries `total`, `checked`, `bounced` and a `recent` arr
 
 ```js
 export async function joinGate(code) {
-  const s = await getDoc(doc(db, GATES, code));
+  let s;
+  try {
+    s = await getDoc(doc(db, GATES, code));
+  } catch (e) {
+    // Rules deny get on a nonexistent gate doc, so an invalid/rotated code
+    // surfaces as permission-denied rather than a clean miss.
+    if (e.code === "permission-denied") return null;
+    throw e;
+  }
   if (!s.exists()) return null;
   const d = s.data();
   // Gate staff are unauthenticated: read everything from the gate doc, never gp_events.
@@ -535,27 +598,54 @@ export async function joinGate(code) {
   };
 }
 
-let statsUnsub = null, statsCode = null;
+let statsUnsub = null, statsCode = null, lastStats = null;
 export function gateStats(code) {
   if (statsUnsub && statsCode === code) return;   // idempotent; scans call this often
   if (statsUnsub) statsUnsub();
-  statsCode = code;
+  lastStats = null;
   statsUnsub = onSnapshot(doc(db, GATES, code), (s) => {
     if (!s.exists()) return;
     const d = s.data();
-    window.dispatchEvent(new CustomEvent("gp-stats", { detail: {
+    lastStats = {
       counts: { total: d.total || 0, checked: d.checked || 0, bounced: d.bounced || 0 },
       recent: d.recent || [],
+    };
+    window.dispatchEvent(new CustomEvent("gp-stats", { detail: {
+      badCode: false, offline: false, ...lastStats,
+    }}));
+  }, (e) => {
+    // Bad/rotated codes get zeroed counts; transient/offline errors keep the last
+    // known counts. Counts/recent are always present so consumers never throw.
+    const badCode = e.code === "permission-denied";
+    const cached = !badCode && lastStats;
+    window.dispatchEvent(new CustomEvent("gp-stats", { detail: {
+      badCode, offline: !badCode,
+      counts: cached ? lastStats.counts : { total: 0, checked: 0, bounced: 0 },
+      recent: cached ? lastStats.recent : [],
     }}));
   });
+  statsCode = code;
+}
+
+export function stopStats() {
+  if (statsUnsub) statsUnsub();
+  statsUnsub = null;
+  statsCode = null;
 }
 
 export async function gateFind(code, text) {
   const q = text.trim().toLowerCase();
   if (q.length < 2) return [];
-  const s = await getDocs(query(
-    collection(db, GATES, code, "roster"),
-    where("nameLower", ">=", q), where("nameLower", "<=", q + "\uf8ff"), limit(8)));
+  let s;
+  try {
+    s = await getDocs(query(
+      collection(db, GATES, code, "roster"),
+      where("nameLower", ">=", q), where("nameLower", "<=", q + "\uf8ff"), limit(8)));
+  } catch (e) {
+    // Rules deny reads under a nonexistent (invalid/rotated) gate code.
+    if (e.code === "permission-denied") return [];
+    throw e;
+  }
   return s.docs.map((d) => {
     const r = d.data();
     return {
