@@ -1,16 +1,15 @@
 // Organiser app: sign in, events, registrations → passes, links, gate code, live counter.
 import {
-  cfg, configured, ART, artUrl, passUrl, gateUrl, fmtCode, fmtWhen, fmtTime, fmtDay, esc, plural,
-  store, copyText, toast, download, qrSvg, I, paintIcons, PAUSED_MSG, escT, typo,
+  configured, ART, artUrl, passUrl, gateUrl, fmtCode, fmtWhen, fmtTime, fmtDay, esc, plural,
+  store, copyText, toast, download, qrSvg, I, paintIcons, DB_MSG, escT, typo,
 } from "./core.js";
+import * as fb from "./firebase.js";
 import { parseTable, analyse, toPasses, toCsv, isEmail, isPhone } from "./csv.js";
 
 const view = document.getElementById("view");
 const roleEl = document.getElementById("role");
-let sb = null;
 let session = null;
-let live = null;          // realtime channel for the open event
-let pollTimer = null;
+let live = null;
 
 const MAX_ROWS = 5000;
 
@@ -31,23 +30,16 @@ function notConfigured() {
 }
 
 async function boot() {
-  if (!configured || !window.supabase) return notConfigured();
-  sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey, {
-    auth: { flowType: "implicit", detectSessionInUrl: true, persistSession: true, autoRefreshToken: true },
-  });
-  const hashErr = new URLSearchParams((location.hash || "").replace(/^#/, "")).get("error_description");
-  const { data } = await sb.auth.getSession();
-  session = data.session;
-  sb.auth.onAuthStateChange((evt, s) => {
+  if (!configured || !fb.configured) return notConfigured();
+  session = await new Promise((resolve) => fb.onAuth(resolve));
+  await fb.redirectResult().catch(() => {});
+  fb.onAuth((u) => {
     const was = !!session;
-    session = s;
-    if (evt === "SIGNED_OUT" || (!was && s)) route();
+    session = u;
+    if (!was && u) route();
+    if (was && !u) { session = null; route(); }
   });
   window.addEventListener("hashchange", route);
-  if (hashErr && !session) {
-    history.replaceState(null, "", location.pathname);
-    return signInView(/expired|invalid/i.test(hashErr) ? "That sign-in link expired or was already used. Send a new one." : hashErr);
-  }
   route();
 }
 
@@ -58,8 +50,8 @@ function route() {
   if (route.last !== undefined && route.last !== h) window.scrollTo(0, 0);
   route.last = h;
   if (!session) return signInView();
-  roleEl.innerHTML = `Organiser <button class="icon-btn" type="button" id="signout" title="Sign out (${esc(session.user.email || "")})" aria-label="Sign out" style="width:36px;height:36px;margin-left:4px">${I.out}</button>`;
-  roleEl.querySelector("#signout").addEventListener("click", async () => { await sb.auth.signOut(); location.hash = ""; });
+  roleEl.innerHTML = `Organiser <button class="icon-btn" type="button" id="signout" title="Sign out (${esc(session.email || "")})" aria-label="Sign out" style="width:36px;height:36px;margin-left:4px">${I.out}</button>`;
+  roleEl.querySelector("#signout").addEventListener("click", async () => { await fb.signOutUser(); location.hash = ""; });
   const m = h.match(/^#\/e\/([0-9a-f-]{36})(\/edit)?$/);
   if (h === "#/new") return eventForm();
   if (m) return m[2] ? eventForm(m[1]) : eventView(m[1]);
@@ -68,7 +60,7 @@ function route() {
 
 function fail(e) {
   const msg = e?.message || String(e);
-  const paused = /fetch|network|Failed to fetch|5\d\d/.test(msg) ? PAUSED_MSG + " Or check your connection." : msg;
+  const paused = /fetch|network|Failed to fetch|5\d\d/.test(msg) ? DB_MSG + " Or check your connection." : msg;
   view.innerHTML = `<section class="empty"><h3>Something broke</h3><p class="sub">${esc(paused)}</p><p style="margin-top:14px"><button class="btn small" type="button" onclick="location.reload()">${I.refresh}Try again</button></p></section>`;
 }
 
@@ -85,63 +77,22 @@ function signInView(errMsg = "") {
         <span class="poster-when">Open source · ₹0</span>
       </div>
       <div class="stack" style="margin-top:14px">
-      <p class="sub" style="font-size:17px;color:var(--blue)">Upload your registrations sheet and everyone gets their own QR pass. At the gate, any phone becomes the scanner. A screenshot of a pass works once.</p>
-
-      ${cfg.emailSignIn === false ? `
-      <p class="err" id="sErr" role="alert" ${errMsg ? "" : "hidden"}>${esc(errMsg)}</p>
-      <button class="btn-primary compact" type="button" id="google"><span class="gdisc">${I.google}</span><span class="label">Continue with Google</span><span class="arrow">${I.arrow}</span></button>
-      <p class="fine" style="margin:0">Organisers sign in with Google. Gate staff and attendees never need an account.</p>` : `
-      <form id="signin" class="stack" novalidate style="margin-top:6px">
-        <label class="field"><span>Organiser email</span>
-          <input class="input" type="email" id="email" autocomplete="email" inputmode="email" placeholder="you@college.edu" required value="${esc(store.get("gp.email", ""))}">
-        </label>
+        <p class="sub" style="font-size:17px;color:var(--blue)">Upload your registrations sheet and everyone gets their own QR pass. At the gate, any phone becomes the scanner. A screenshot of a pass works once.</p>
         <p class="err" id="sErr" role="alert" ${errMsg ? "" : "hidden"}>${esc(errMsg)}</p>
-        <button class="btn-primary compact" type="submit" id="sendBtn"><span class="label">Send me a sign-in link</span><span class="arrow">${I.arrow}</span></button>
-      </form>
-      ${cfg.googleSignIn ? `<div class="or">or</div>
-      <button class="row" type="button" id="google" style="min-height:62px;justify-content:center">${I.google}<span>Continue with Google</span></button>` : ""}`}
-      <div class="links" style="margin-top:8px">
-        <a href="gate/">${I.qr} Gate staff? Join with a code</a>
-        <a href="https://github.com/Souradip121/gatepass" rel="noopener">${I.open} Host your own copy</a>
-      </div>
+        <button class="btn-primary compact" type="button" id="google"><span class="gdisc">${I.google}</span><span class="label">Continue with Google</span><span class="arrow">${I.arrow}</span></button>
+        <p class="fine" style="margin:0">Organisers sign in with Google. Gate staff and attendees never need an account.</p>
+        <div class="links" style="margin-top:8px">
+          <a href="gate/">${I.qr} Gate staff? Join with a code</a>
+          <a href="https://github.com/Souradip121/gatepass" rel="noopener">${I.open} Host your own copy</a>
+        </div>
       </div>
     </section>`;
   view.querySelectorAll(".links svg").forEach((s) => { s.style.width = "18px"; s.style.height = "18px"; });
   view.querySelector("#art").style.backgroundImage = `url("${artUrl(0)}")`;
-  const form = view.querySelector("#signin"), err = view.querySelector("#sErr"), btn = view.querySelector("#sendBtn");
-  form?.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const email = view.querySelector("#email").value.trim();
-    if (!isEmail(email)) { err.textContent = "That email doesn't look right."; err.hidden = false; return; }
-    store.set("gp.email", email);
-    btn.disabled = true; btn.querySelector(".label").textContent = "Sending…";
-    const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname, shouldCreateUser: true } });
-    btn.disabled = false; btn.querySelector(".label").textContent = "Send me a sign-in link";
-    if (error) {
-      err.textContent = /rate|too many|seconds/i.test(error.message)
-        ? `Too many sign-in emails right now. ${cfg.googleSignIn ? "Use Google, or wait" : "Wait"} a few minutes and try again.`
-        : error.message;
-      err.hidden = false;
-      return;
-    }
-    checkInbox(email);
+  view.querySelector("#google").addEventListener("click", async () => {
+    try { await fb.signIn(); }
+    catch (e) { const err = view.querySelector("#sErr"); err.textContent = e.message; err.hidden = false; }
   });
-  view.querySelector("#google")?.addEventListener("click", () => {
-    sb.auth.signInWithOAuth({ provider: "google", options: { redirectTo: location.origin + location.pathname } });
-  });
-}
-
-function checkInbox(email) {
-  view.innerHTML = `
-    <section class="stack narrow">
-      <div class="empty">
-        <h3>Check your inbox</h3>
-        <p class="sub" style="color:var(--blue)">We sent a sign-in link to <b>${esc(email)}</b>. Open it on this device. It works once and expires in an hour.</p>
-        <p class="fine" style="margin:10px 0 0">Nothing after a minute? Look in spam, or go back and try again.</p>
-      </div>
-      <button class="btn" type="button" id="again">${I.back} Use a different email</button>
-    </section>`;
-  view.querySelector("#again").addEventListener("click", () => signInView());
 }
 
 // ─────────────────────────────────────────────── events list
@@ -149,14 +100,23 @@ function checkInbox(email) {
 async function listView() {
   document.title = "Your events · GatePass";
   view.innerHTML = `<div class="skeleton" style="height:220px"></div>`;
-  const { data, error } = await sb.from("gp_events")
-    .select("id,name,club,starts_at,venue,art,gp_passes(count),gp_scans(count)")
-    .eq("gp_scans.is_first", true)
-    .order("starts_at", { ascending: false });
-  if (error) return fail(error);
+  let data;
+  try {
+    const idx = await fb.listEvents(session.uid);
+    data = await Promise.all(idx.map(async (e) => {
+      const full = await fb.getEvent(e.id);
+      const gate = full ? await fb.joinGate(full.gate_code) : null;
+      return {
+        id: e.id, name: full?.name || e.name, club: full?.club || "",
+        starts_at: full?.starts_at || e.starts_at, venue: full?.venue || "",
+        art: full?.art || 0,
+        total: gate?.counts.total || 0, checked: gate?.counts.checked || 0,
+      };
+    }));
+  } catch (e) { return fail(e); }
   const now = Date.now();
   const stubs = data.map((e) => {
-    const total = e.gp_passes?.[0]?.count ?? 0, checked = e.gp_scans?.[0]?.count ?? 0;
+    const total = e.total ?? 0, checked = e.checked ?? 0;
     const past = new Date(e.starts_at).getTime() < now - 12 * 3600e3;
     return `
       <a class="stub" href="#/e/${e.id}" style="${past ? "opacity:.72" : ""}">
@@ -193,10 +153,11 @@ const hm = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinute
 async function eventForm(id = null) {
   let ev = { name: "", club: "", venue: "", art: 0, starts_at: null };
   if (id) {
-    const { data, error } = await sb.from("gp_events").select("*").eq("id", id).maybeSingle();
-    if (error) return fail(error);
-    if (!data) { location.hash = ""; return; }
-    ev = data;
+    try {
+      const data = await fb.getEvent(id);
+      if (!data) { location.hash = ""; return; }
+      ev = data;
+    } catch (e) { return fail(e); }
   }
   const when = ev.starts_at ? new Date(ev.starts_at) : (() => { const d = nextSaturday(); d.setHours(18, 0, 0, 0); return d; })();
   document.title = `${id ? "Edit" : "New"} event · GatePass`;
@@ -231,44 +192,40 @@ async function eventForm(id = null) {
     if (isNaN(starts)) { err.textContent = "Pick a date and time."; err.hidden = false; return; }
     const row = { name, club: String(f.get("club")).trim(), venue: String(f.get("venue")).trim(), art: Number(f.get("art") || 0), starts_at: starts.toISOString() };
     const btn = view.querySelector("#saveBtn"); btn.disabled = true;
-    const q = id ? sb.from("gp_events").update(row).eq("id", id).select("id").single() : sb.from("gp_events").insert(row).select("id").single();
-    const { data, error } = await q;
+    let data;
+    try {
+      if (id) {
+        await fb.updateEvent(id, row);
+        data = { id };
+      } else {
+        data = { id: await fb.createEvent(row) };
+      }
+    } catch (e) {
+      btn.disabled = false;
+      err.textContent = e.message;
+      err.hidden = false;
+      return;
+    }
     btn.disabled = false;
-    if (error) { err.textContent = error.message; err.hidden = false; return; }
     location.hash = `#/e/${data.id}`;
   });
 }
 
 // ─────────────────────────────────────────────── one event
 
-async function fetchAll(table, cols, eventId, extra = (q) => q) {
-  const out = [];
-  for (let from = 0; ; from += 1000) {
-    const { data, error } = await extra(sb.from(table).select(cols).eq("event_id", eventId)).order("id").range(from, from + 999);
-    if (error) throw error;
-    out.push(...data);
-    if (data.length < 1000) break;
-  }
-  return out;
-}
-
 async function eventView(id) {
   view.innerHTML = `<div class="skeleton" style="height:520px"></div>`;
-  let ev, passes, scans;
+  let ev, passes, gate;
   try {
-    const r = await sb.from("gp_events").select("*").eq("id", id).maybeSingle();
-    if (r.error) throw r.error;
-    if (!r.data) { toast("That event isn't yours or was deleted", "x"); location.hash = ""; return; }
-    ev = r.data;
-    [passes, scans] = await Promise.all([
-      fetchAll("gp_passes", "id,name,contact,token,created_at", id),
-      fetchAll("gp_scans", "id,pass_id,is_first,gate,scanned_at", id),
-    ]);
+    ev = await fb.getEvent(id);
+    if (!ev) { toast("That event isn't yours or was deleted", "x"); location.hash = ""; return; }
+    passes = await fb.getPasses(id);
+    gate = await fb.joinGate(ev.gate_code);
   } catch (e) { return fail(e); }
 
   passes.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.name.localeCompare(b.name));
-  const state = { ev, passes, first: new Map(), bounced: 0, upload: null, filter: "", shown: 120 };
-  for (const s of scans) s.is_first ? state.first.set(s.pass_id, s) : state.bounced++;
+  const state = { ev, passes, first: new Map(), bounced: 0, checked: gate.counts.checked, upload: null, filter: "", shown: 120 };
+  state.first = new Map(); state.bounced = gate.counts.bounced; state.checked = gate.counts.checked;
 
   document.title = `${typo(ev.name)} · GatePass`;
   view.innerHTML = `
@@ -308,8 +265,12 @@ async function eventView(id) {
   del.addEventListener("click", async () => {
     if (Date.now() - armed > 4000) { armed = Date.now(); del.innerHTML = `${I.trash}Tap again to delete ${plural(state.passes.length, "pass", "passes")}`; setTimeout(() => { if (del.isConnected) del.innerHTML = `${I.trash}Delete event`; }, 4000); return; }
     del.disabled = true;
-    const { error } = await sb.from("gp_events").delete().eq("id", id);
-    if (error) { del.disabled = false; return toast(error.message, "x"); }
+    try {
+      await fb.deleteEvent(id);
+    } catch (e) {
+      del.disabled = false;
+      return toast(e.message, "x");
+    }
     toast("Event deleted");
     location.hash = "";
   });
@@ -415,23 +376,27 @@ async function generate(state) {
   };
   requestAnimationFrame(tick);
   for (let i = 0; i < total; i += 100) {
-    const batch = list.slice(i, i + 100).map((p) => ({ event_id: state.ev.id, name: p.name, contact: p.contact }));
-    const { data, error } = await sb.from("gp_passes").insert(batch).select("id,name,contact,token,created_at");
-    if (error) { failed = error; break; }
-    state.passes.push(...data);
-    done += data.length;
+    const batch = list.slice(i, i + 100).map((p) => ({ name: p.name, contact: p.contact }));
+    try {
+      await fb.generatePasses(state.ev.id, batch, { name: state.ev.name, club: state.ev.club, starts_at: state.ev.starts_at, venue: state.ev.venue, art: state.ev.art, gateCode: state.ev.gate_code });
+    } catch (e) { failed = e; break; }
+    done += batch.length;
   }
   await new Promise((r) => setTimeout(r, 450));
   gc.textContent = done;
   state.upload = null;
   if (failed) toast(`Stopped after ${done}: ${failed.message}`, "x");
   else toast(`${plural(done, "pass", "passes")} ready`);
+  try {
+    state.passes = await fb.getPasses(state.ev.id);
+    state.passes.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.name.localeCompare(b.name));
+  } catch {}
   renderReg(state); renderStat(state); renderPassTools(state); renderList(state);
 }
 
 // ── checked-in counter ──
 function renderStat(state, bump = false) {
-  const total = state.passes.length, checked = state.first.size;
+  const total = state.passes.length, checked = state.checked ?? state.first.size;
   const el = view.querySelector("#stat");
   el.innerHTML = `
     <span class="dot">${I.dotCheck}</span>
@@ -462,8 +427,14 @@ function renderGate(state, showQr = false) {
     const b = e.currentTarget;
     if (Date.now() - armed > 4000) { armed = Date.now(); b.innerHTML = `${I.refresh}Tap again: old code stops working`; return; }
     b.disabled = true;
-    const { data, error } = await sb.rpc("gp_rotate_code", { p_event: ev.id });
-    if (error || !data) { b.disabled = false; return toast(error?.message || "Couldn't change the code", "x"); }
+    let data;
+    try {
+      data = await fb.rotateCode(ev.id, ev.gate_code);
+    } catch (e) {
+      b.disabled = false;
+      return toast(e.message || "Couldn't change the code", "x");
+    }
+    if (!data) { b.disabled = false; return toast("Couldn't change the code", "x"); }
     ev.gate_code = data;
     renderGate(state, showQr);
     toast("New gate code. Staff need to re-join.");
@@ -551,36 +522,19 @@ function renderList(state) {
 // ── live updates ──
 function startLive(state) {
   stopLive();
-  const id = state.ev.id;
-  const apply = (s) => {
-    if (s.is_first) {
-      if (state.first.has(s.pass_id)) return;
-      state.first.set(s.pass_id, s);
-      const li = view.querySelector(`#plist li[data-id="${s.pass_id}"]`);
-      const p = state.passes.find((x) => x.id === s.pass_id);
-      if (li && p) li.outerHTML = rowHtml(state, p);
-    } else state.bounced++;
-    renderStat(state, true);
+  const onStats = (e) => {
+    const c = e.detail?.counts;
+    if (!c || e.detail.badCode) return;
+    const changed = c.checked !== state.checked || c.bounced !== state.bounced;
+    state.checked = c.checked;
+    state.bounced = c.bounced;
+    if (changed) { renderStat(state, true); renderList(state); }
   };
-  live = sb.channel(`gp-scans-${id}`)
-    .on("postgres_changes", { event: "INSERT", schema: "public", table: "gp_scans", filter: `event_id=eq.${id}` }, (msg) => apply(msg.new))
-    .subscribe();
-  // Belt and braces: re-sync every 20 s in case the socket sleeps (phones do that).
-  pollTimer = setInterval(async () => {
-    if (document.visibilityState !== "visible") return;
-    try {
-      const scans = await fetchAll("gp_scans", "id,pass_id,is_first,gate,scanned_at", id);
-      const before = state.first.size + state.bounced;
-      state.first = new Map(); state.bounced = 0;
-      for (const s of scans) s.is_first ? state.first.set(s.pass_id, s) : state.bounced++;
-      if (state.first.size + state.bounced !== before) { renderStat(state, true); renderList(state); }
-    } catch {}
-  }, 20000);
+  window.addEventListener("gp-stats", onStats);
+  live = () => { window.removeEventListener("gp-stats", onStats); fb.stopStats(); };
+  fb.gateStats(state.ev.gate_code);
 }
-function stopLive() {
-  if (live) { sb.removeChannel(live); live = null; }
-  clearInterval(pollTimer);
-}
+function stopLive() { if (live) { live(); live = null; } }
 
 paintIcons();
 boot().catch(fail);
