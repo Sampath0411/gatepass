@@ -63,7 +63,10 @@ service cloud.firestore {
       // only a Cloud Function (server-side scan) can fully hide the token.
       // The client no longer returns or renders the token from gate search.
       allow read: if exists(/databases/$(database)/documents/gp_gates/$(code));
-      allow create, delete: if isOwner(
+      allow create: if isOwner(
+        get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId)
+        || (signedIn() && get(/databases/$(database)/documents/gp_reg_public/$(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId)).data.gateCode == code);
+      allow delete: if isOwner(
         get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
       // Owner-only update. The scan transaction no longer writes the roster
       // stamp: checked-in state is derived from the one-shot claim doc instead.
@@ -76,6 +79,10 @@ service cloud.firestore {
       allow get: if true;
       allow list: if false;
       allow create: if isOwner(request.resource.data.eventId);
+      // Phase A: a signed-in student creates their own public pass doc during
+      // registration. Firestore ORs the two create grants.
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['id','festId','eventId','event','name','checkedInAt','gate']);
       // SECURITY (21 Nov 2026): owner-only update. The old rule let any
       // token-holder flip checkedInAt/gate on their own pass, faking a
       // check-in on the pass page. The scan transaction no longer writes
@@ -108,6 +115,49 @@ service cloud.firestore {
         && request.resource.data.keys().hasAll(['eventId', 'gate', 'device', 'scannedAt']);
       allow update: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
       allow delete: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
+    }
+
+    // ── Phase A: fests, sub-events, public registration ──
+    function isFestOwner(festId) {
+      return signedIn() && get(/databases/$(database)/documents/gp_fests/$(festId)).data.ownerId == request.auth.uid;
+    }
+    function isSubEventOwner(festId, eventId) {
+      return isFestOwner(festId)
+        && exists(/databases/$(database)/documents/gp_fests/$(festId)/events/$(eventId));
+    }
+
+    match /gp_fests/{festId} {
+      allow get, update, delete: if isFestOwner(festId);
+      allow list: if false;
+      allow create: if signedIn() && request.resource.data.ownerId == request.auth.uid;
+    }
+    match /gp_users/{uid}/fests/{festId} {
+      allow read, create, update, delete: if signedIn() && uid == request.auth.uid;
+    }
+    match /gp_fests/{festId}/events/{eventId} {
+      allow read, create, update, delete: if isFestOwner(festId);
+    }
+    match /gp_reg_public/{eventId} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if isFestOwner(request.resource.data.festId);
+      allow update, delete: if isFestOwner(resource.data.festId);
+    }
+
+    // A student may create exactly one pass of their own for an open event.
+    match /gp_fests/{festId}/events/{eventId}/passes/{passId} {
+      allow read: if isFestOwner(festId);
+      allow create: if signedIn()
+        && request.resource.data.uid == request.auth.uid
+        && get(/databases/$(database)/documents/gp_reg_public/$(eventId)).data.registrationOpen == true
+        && request.resource.data.keys().hasOnly(['name','contact','token','uid','registrationId','createdAt','checkedInAt','gate']);
+      allow update, delete: if isFestOwner(festId);
+    }
+    match /gp_fests/{festId}/registrations/{regId} {
+      allow read, update, delete: if isFestOwner(festId);
+      allow create: if signedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['eventId','eventName','festId','name','email','phone','uid','passId','token','createdAt','sheetSynced']);
     }
   }
 }
