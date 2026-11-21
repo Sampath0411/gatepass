@@ -7,6 +7,18 @@
 5. Deploy to GitHub Pages or Firebase Hosting (`firebase deploy --only hosting`, after the login/use from step 3). No build step is needed.
 6. Sign in with Google, create an event, upload a small CSV, and test with two phones before the real event.
 
+## Troubleshooting: "The database is temporarily unavailable"
+
+If a signed-in organiser gets stuck loading an event, or sees this message, the Firestore client could not reach the backend. The usual cause is that **Cloud Firestore has not been enabled** for the project in `firebase-config.js` — the SDK then reports `5 NOT_FOUND` and goes permanently offline, so reads never settle.
+
+Fix:
+
+1. Firebase console → your project → **Build → Firestore Database → Create database**. Choose **production mode** and a region. This is a one-time step per project.
+2. Paste `firestore.rules` into the **Rules** tab and publish (or use the CLI command in step 3 above).
+3. **Authentication → Settings → Authorised domains** must include the domain you are serving from (`localhost` for local testing, your GitHub Pages / Hosting domain in production), and the Google provider must be enabled.
+4. Confirm `firebase-config.js` contains the web config of the **same project** where you enabled Firestore. A config copied from another project will sign you in but read/write a project with no database.
+5. Hard-refresh the page (Ctrl/Cmd+Shift+R) to clear the cached JS, then try again.
+
 ## Data layout
 All collections are prefixed `gp_` so the project can be shared. The gate code and pass token are capabilities: staff and attendees need no account. The one accepted scan per pass is enforced by the claim document ID and by Security Rules.
 
