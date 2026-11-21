@@ -225,8 +225,11 @@ async function eventView(id) {
   try { claims = await fb.getClaims(ev.gate_code); } catch {}
 
   passes.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.name.localeCompare(b.name));
-  const state = { ev, passes, first: new Map(), bounced: gate?.counts.bounced ?? 0, checked: gate?.counts.checked ?? 0, upload: null, filter: "", shown: 120 };
+  // Only bounced comes from the staff-writable gate doc; the checked count and
+  // per-pass stamps come from immutable claim docs.
+  const state = { ev, passes, first: new Map(), bounced: gate?.counts.bounced ?? 0, checked: 0, upload: null, filter: "", shown: 120 };
   for (const claim of claims) if (claim.is_first) state.first.set(claim.pass_id, claim);
+  state.checked = state.first.size;
 
   document.title = `${typo(ev.name)} · GatePass`;
   view.innerHTML = `
@@ -523,19 +526,38 @@ function renderList(state) {
 // ── live updates ──
 function startLive(state) {
   stopLive();
+  let refreshing = false, again = false, active = true, lastBounced = state.bounced;
+  // The gate doc's `recent` array is writable by any gate-code holder, so never
+  // trust it for per-pass stamps. Re-read the authoritative claim docs instead.
+  const refresh = async () => {
+    if (!active || refreshing) { again = active; return; }   // coalesce bursts without dropping them
+    refreshing = true;
+    try {
+      do {
+        again = false;
+        const prevChecked = state.checked, prevBounced = state.bounced;
+        let claims = [];
+        try { claims = await fb.getClaims(state.ev.gate_code); } catch {}
+        if (!active) return;   // view was torn down while the fetch was in flight
+        state.first = new Map();
+        for (const claim of claims) if (claim.is_first) state.first.set(claim.pass_id, claim);
+        state.checked = state.first.size;
+        state.bounced = lastBounced;
+        renderStat(state, state.checked !== prevChecked || state.bounced !== prevBounced);
+        renderList(state);
+      } while (again);
+    } finally {
+      refreshing = false;
+    }
+  };
   const onStats = (e) => {
     const c = e.detail?.counts;
     if (!c || e.detail.badCode) return;
-    for (const item of e.detail.recent || []) {
-      if (item.passId && item.is_first) state.first.set(item.passId, { pass_id: item.passId, scanned_at: item.at, gate: item.gate, is_first: true });
-    }
-    const changed = c.checked !== state.checked || c.bounced !== state.bounced;
-    state.checked = c.checked;
-    state.bounced = c.bounced;
-    if (changed) { renderStat(state, true); renderList(state); }
+    lastBounced = c.bounced;   // bounced is the only count taken from the gate doc
+    refresh();
   };
   window.addEventListener("gp-stats", onStats);
-  live = () => { window.removeEventListener("gp-stats", onStats); fb.stopStats(); };
+  live = () => { active = false; window.removeEventListener("gp-stats", onStats); fb.stopStats(); };
   fb.gateStats(state.ev.gate_code);
 }
 function stopLive() { if (live) { live(); live = null; } }

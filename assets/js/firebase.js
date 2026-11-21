@@ -431,11 +431,14 @@ export async function scanToken(code, token, gateName, device) {
       bounced: increment(1),
       recent: [recent[0], ...(g.data().recent || [])].slice(0, 6),
     });
-    // A serverTimestamp() written inside a transaction reads back as null, so take
-    // the first-scan time/gate from the public pass doc, which was committed earlier.
-    const firstAt = stamp(p.data().checkedInAt) || at;
-    const firstGate = p.data().gate || "";
-    const firstDevice = existing.data().device;
+    // The existing claim was written by a PREVIOUS committed transaction, so its
+    // serverTimestamp is already resolved — unlike a claim written in this one.
+    // Prefer those authoritative values; fall back to the public pass doc only if
+    // a claim field is unexpectedly null (that doc is writable by any token holder).
+    const claim = existing.data();
+    const firstAt = stamp(claim.scannedAt) || stamp(p.data().checkedInAt) || at;
+    const firstGate = claim.gate || p.data().gate || "";
+    const firstDevice = claim.device;
     return {
       status: "dup", name: p.data().name,
       first_at: firstAt, first_gate: firstGate,
