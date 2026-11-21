@@ -217,7 +217,9 @@ async function eventForm(id = null) {
       }
     } catch (e) {
       btn.disabled = false;
-      err.textContent = e.message;
+      err.textContent = e.code === "permission-denied"
+        ? "Permission denied. Publish firestore.rules from this project in the Firebase console (see SETUP.md), then try again."
+        : e.message;
       err.hidden = false;
       return;
     }
