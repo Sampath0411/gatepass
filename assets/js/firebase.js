@@ -526,3 +526,105 @@ export async function getClaims(code) {
     };
   });
 }
+
+// ── Phase A: fests, sub-events, public registration ──
+export async function listFests(uid) {
+  const snap = await getDocs(collection(db, "gp_users", uid, "fests"));
+  return snap.docs.map((d) => ({ id: d.id, name: d.data().name, starts_at: stamp(d.data().startsAt) }));
+}
+export async function getFest(id) {
+  const s = await getDoc(doc(db, "gp_fests", id));
+  if (!s.exists()) return null;
+  const d = s.data();
+  return { id, name: d.name, club: d.club || "", venue: d.venue || "", art: d.art || 0,
+    starts_at: stamp(d.startsAt), sheetId: d.sheetId || "", sheetRange: d.sheetRange || "Registrations" };
+}
+export async function createFest(row) {
+  const id = doc(collection(db, "gp_fests")).id;
+  const batch = writeBatch(db);
+  batch.set(doc(db, "gp_fests", id), { ownerId: auth.currentUser.uid, name: row.name,
+    club: row.club, venue: row.venue, art: row.art, startsAt: new Date(row.starts_at),
+    sheetId: "", sheetRange: "Registrations", createdAt: serverTimestamp() });
+  batch.set(doc(db, "gp_users", auth.currentUser.uid, "fests", id), { name: row.name, startsAt: new Date(row.starts_at) });
+  await batch.commit();
+  return id;
+}
+export async function setFestSheet(festId, sheetId, sheetRange) {
+  await updateDoc(doc(db, "gp_fests", festId), { sheetId, sheetRange });
+}
+export async function listSubEvents(festId) {
+  const snap = await getDocs(collection(db, "gp_fests", festId, "events"));
+  return snap.docs.map((d) => { const e = d.data(); return { id: d.id, festId, name: e.name,
+    club: e.club || "", venue: e.venue || "", art: e.art || 0, starts_at: stamp(e.startsAt),
+    gate_code: e.gateCode, registration_open: !!e.registrationOpen,
+    capacity: e.capacity || 0, total: e.total || 0, checked: e.checked || 0 }; });
+}
+export async function createSubEvent(festId, row) {
+  const id = doc(collection(db, "gp_fests", festId, "events")).id;
+  const code = newCode();
+  const batch = writeBatch(db);
+  batch.set(doc(db, "gp_fests", festId, "events", id), { festId, name: row.name, club: row.club,
+    venue: row.venue, art: row.art, startsAt: new Date(row.starts_at), gateCode: code,
+    registrationOpen: row.registration_open !== false, capacity: row.capacity || 0,
+    total: 0, checked: 0, bounced: 0, recent: [], createdAt: serverTimestamp() });
+  batch.set(doc(db, "gp_gates", code), { festId, eventId: id, name: row.name, club: row.club,
+    venue: row.venue, art: row.art, startsAt: new Date(row.starts_at),
+    total: 0, checked: 0, bounced: 0, recent: [] });
+  batch.set(doc(db, "gp_reg_public", id), { festId, name: row.name, club: row.club, venue: row.venue,
+    art: row.art, startsAt: new Date(row.starts_at), gateCode: code,
+    registrationOpen: row.registration_open !== false, capacity: row.capacity || 0, total: 0 });
+  await batch.commit();
+  return { id, code };
+}
+export async function setRegistrationOpen(festId, eventId, open) {
+  await updateDoc(doc(db, "gp_fests", festId, "events", eventId), { registrationOpen: open });
+  await updateDoc(doc(db, "gp_reg_public", eventId), { registrationOpen: open });
+}
+export async function getRegistrationDescriptor(eventId) {
+  const s = await getDoc(doc(db, "gp_reg_public", eventId));
+  if (!s.exists()) return null;
+  const d = s.data();
+  return { event_id: eventId, fest_id: d.festId, name: d.name, club: d.club || "",
+    venue: d.venue || "", art: d.art || 0, starts_at: stamp(d.startsAt),
+    registration_open: !!d.registrationOpen, capacity: d.capacity || 0, total: d.total || 0,
+    gate_code: d.gateCode };
+}
+export async function registerStudentWithCode(desc, user, fields, code) {
+  // Defense in depth: the caller passes the gate code, so re-validate it here
+  // against the signed-in-readable descriptor. A stale or tampered code must not
+  // be allowed to write a roster entry under a code that belongs to another event.
+  const def = await getDoc(doc(db, "gp_reg_public", desc.event_id));
+  if (!def.exists() || def.data().gateCode !== code) throw new Error("Invalid registration code");
+  const eventPath = ["gp_fests", desc.fest_id, "events", desc.event_id];
+  const passId = doc(collection(db, ...eventPath, "passes")).id;
+  const token = newToken();
+  const regRef = doc(collection(db, "gp_fests", desc.fest_id, "registrations"));
+  const batch = writeBatch(db);
+  batch.set(doc(db, ...eventPath, "passes", passId), { name: fields.name, contact: fields.contact,
+    token, uid: user.uid, registrationId: regRef.id, createdAt: serverTimestamp(), checkedInAt: null, gate: "" });
+  batch.set(regRef, { eventId: desc.event_id, eventName: desc.name, festId: desc.fest_id,
+    name: fields.name, email: fields.email || "", phone: fields.phone || "", uid: user.uid,
+    passId, token, createdAt: serverTimestamp(), sheetSynced: false });
+  batch.set(doc(db, "gp_passes", token), { id: passId, festId: desc.fest_id, eventId: desc.event_id,
+    event: { name: desc.name, club: desc.club, starts_at: desc.starts_at, venue: desc.venue, art: desc.art },
+    name: fields.name, checkedInAt: null, gate: "" });
+  batch.set(doc(db, "gp_gates", code, "roster", passId), { name: fields.name,
+    nameLower: fields.name.toLowerCase(), hint: mask(fields.contact || ""), token,
+    checkedInAt: null, gate: "" });
+  await batch.commit();
+  return { token, passId, registrationId: regRef.id };
+}
+export async function listRegistrations(festId) {
+  const snap = await getDocs(collection(db, "gp_fests", festId, "registrations"));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data(), created_at: stamp(d.data().createdAt),
+    sheet_synced: !!d.data().sheetSynced }));
+}
+export async function markSheetSynced(festId, regId) {
+  await updateDoc(doc(db, "gp_fests", festId, "registrations", regId), { sheetSynced: true });
+}
+export function watchRegistrations(festId, cb) {
+  return onSnapshot(collection(db, "gp_fests", festId, "registrations"), (snap) => {
+    cb(snap.docs.map((d) => ({ id: d.id, ...d.data(), created_at: stamp(d.data().createdAt),
+      sheet_synced: !!d.data().sheetSynced })));
+  });
+}
