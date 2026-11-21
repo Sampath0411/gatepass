@@ -100,6 +100,20 @@ export async function passImageBlob(pass, token) {
   });
 }
 
+/** Copy the PNG as an image to the clipboard so it can be pasted into Gmail (Chrome/Edge). */
+export async function copyImageToClipboard(blob) {
+  try {
+    if (!window.ClipboardItem || !navigator.clipboard?.write) return false;
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+    return true;
+  } catch { return false; }
+}
+
+/** Open Gmail with a prefilled message (links cannot carry attachments). */
+export function gmailCompose(to, subject, body) {
+  return `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(to)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
 /**
  * Uses the device share sheet when it accepts files (mobile), otherwise downloads the PNG.
  */

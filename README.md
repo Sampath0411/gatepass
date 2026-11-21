@@ -23,7 +23,7 @@ Made by [sampath.exe](https://github.com/sampath0411).
 | **Attendee** | Opens their link, shows the ticket at the gate, and can share or download the full pass photo from the pass page. A screenshot works too, once. | No |
 | **Gate staff** | Open `/gate/`, type the event's 8-character gate code, pick a gate name and point the camera at passes. "Find by name" covers dead phones. | No |
 
-GatePass sends no email or messages itself. Each pass row has WhatsApp / email / copy buttons that open your own app with the message filled in.
+GatePass sends no email or messages itself. Each pass row has copy, WhatsApp, photo and email buttons. The email button copies the full pass photo (with that person's name and QR) to your clipboard and opens Gmail — paste it into the message (Ctrl+V, or long-press → Paste) to include the image. On mobile it can share the image directly through your phone's share sheet instead. Browsers cannot attach files through a compose link, so this paste step is necessary.
 
 ### Why a screenshot only works once
 

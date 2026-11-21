@@ -5,7 +5,7 @@ import {
 } from "./core.js";
 import * as fb from "./firebase.js";
 import { parseTable, analyse, toPasses, toCsv, isEmail, isPhone } from "./csv.js";
-import { passImageBlob, shareOrDownload } from "./pass-image.js";
+import { passImageBlob, shareOrDownload, copyImageToClipboard, gmailCompose } from "./pass-image.js";
 
 const view = document.getElementById("view");
 const roleEl = document.getElementById("role");
@@ -471,13 +471,7 @@ function msgFor(state, p) {
 }
 function sendHref(state, p) {
   const c = p.contact || "";
-  if (isEmail(c)) {
-    // mailto: opens a blank tab when no mail app is configured — use Gmail compose instead.
-    return {
-      href: `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c)}&su=${encodeURIComponent(`Your pass for ${state.ev.name}`)}&body=${encodeURIComponent(msgFor(state, p))}`,
-      icon: I.mail, label: "Email",
-    };
-  }
+  if (isEmail(c)) return { email: c, icon: I.mail, label: "Email" };
   if (isPhone(c)) {
     let d = c.replace(/\D/g, "");
     if (d.length === 10) d = "91" + d;          // assume India for bare 10-digit numbers
@@ -525,7 +519,9 @@ function rowHtml(state, p) {
       <p class="pl-name">${esc(p.name)}</p>
       <p class="pl-meta">${s ? `<span class="in">In ${esc(fmtTime(s.scanned_at))} · ${esc(s.gate)}</span> · ` : ""}${esc(p.contact || "no contact")}</p>
       <div class="pl-actions">
-        ${send ? `<a class="icon-btn" href="${esc(send.href)}" target="_blank" rel="noopener" aria-label="${send.label} ${esc(p.name)} their pass" title="${send.label}">${send.icon}</a>` : ""}
+        ${send ? (send.email
+          ? `<button class="icon-btn" type="button" data-email="${esc(p.token)}" aria-label="Email ${esc(p.name)} their pass photo" title="Email pass photo">${send.icon}</button>`
+          : `<a class="icon-btn" href="${esc(send.href)}" target="_blank" rel="noopener" aria-label="${send.label} ${esc(p.name)} their pass" title="${send.label}">${send.icon}</a>`) : ""}
         <button class="icon-btn" type="button" data-image="${esc(p.token)}" aria-label="Share ${esc(p.name)}'s pass photo" title="Share pass photo">${I.image}</button>
         <button class="icon-btn" type="button" data-copy="${esc(p.token)}" aria-label="Copy ${esc(p.name)}'s pass link" title="Copy link">${I.copy}</button>
         <a class="icon-btn" href="${esc(passUrl(p.token))}" target="_blank" rel="noopener" aria-label="Open ${esc(p.name)}'s pass" title="Open pass">${I.open}</a>
@@ -542,6 +538,46 @@ function renderList(state) {
   more.innerHTML = list.length > state.shown ? `<button class="btn small" type="button" id="moreBtn">Show ${Math.min(240, list.length - state.shown)} more of ${list.length - state.shown}</button>` : "";
   more.querySelector("#moreBtn")?.addEventListener("click", () => { state.shown += 240; renderList(state); });
   ul.onclick = async (e) => {
+    const mail = e.target.closest("[data-email]");
+    if (mail) {
+      const p = state.passes.find((x) => x.token === mail.dataset.email);
+      if (!p) return;
+      const info = sendHref(state, p);
+      if (!info?.email) return;
+      mail.disabled = true;
+      const popup = window.open("", "_blank");
+      if (popup) popup.opener = null;
+      const openGmail = (to, subject, body) => {
+        const url = gmailCompose(to, subject, body);
+        if (popup && !popup.closed) popup.location.href = url;
+        else window.open(url, "_blank", "noopener");
+      };
+      try {
+        const s = state.first.get(p.id);
+        const blob = await passImageBlob({
+          name: p.name,
+          event: { name: state.ev.name, club: state.ev.club, starts_at: state.ev.starts_at, venue: state.ev.venue, art: state.ev.art },
+          checked_in_at: s?.scanned_at, gate: s?.gate,
+        }, p.token);
+        const filename = `gatepass-${p.name.replace(/[^A-Za-z0-9]+/g, "-")}.png`;
+        const copied = await copyImageToClipboard(blob);
+        if (copied) {
+          openGmail(info.email, `Your pass for ${state.ev.name}`,
+            `Hi ${p.name.split(" ")[0]}!\n\nYour pass photo is copied to your clipboard — paste it here (Ctrl+V, or long-press and Paste) to include it.\n\n${passUrl(p.token)}`);
+          toast("Pass photo copied — paste it into the email", "check");
+        } else {
+          const shared = await shareOrDownload(blob, filename, `${p.name}'s GatePass for ${state.ev.name}`);
+          if (shared !== "shared") {
+            openGmail(info.email, `Your pass for ${state.ev.name}`,
+              `${msgFor(state, p)}\n\nThe pass photo was downloaded — please attach it to this email.`);
+          }
+          if (shared === "shared" && popup && !popup.closed) popup.close();
+          toast(shared === "shared" ? "Pass photo shared" : "Pass photo downloaded — attach it in Gmail");
+        }
+      } catch (err) { toast("Couldn't make the pass photo: " + err.message, "x"); }
+      finally { mail.disabled = false; }
+      return;
+    }
     const img = e.target.closest("[data-image]");
     if (img) {
       const p = state.passes.find((x) => x.token === img.dataset.image);
