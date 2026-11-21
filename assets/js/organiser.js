@@ -51,7 +51,8 @@ function route() {
   if (!session) return signInView();
   roleEl.innerHTML = `Organiser <button class="icon-btn" type="button" id="signout" title="Sign out (${esc(session.email || "")})" aria-label="Sign out" style="width:36px;height:36px;margin-left:4px">${I.out}</button>`;
   roleEl.querySelector("#signout").addEventListener("click", async () => { await fb.signOutUser(); location.hash = ""; });
-  const m = h.match(/^#\/e\/([0-9a-f-]{36})(\/edit)?$/);
+  // Firestore auto-IDs are 20-character alphanumeric strings, not UUIDs.
+  const m = h.match(/^#\/e\/([A-Za-z0-9_-]+)(\/edit)?$/);
   if (h === "#/new") return eventForm();
   if (m) return m[2] ? eventForm(m[1]) : eventView(m[1]);
   return listView();
