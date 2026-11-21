@@ -4,7 +4,7 @@
 2. Enable **Authentication → Sign-in method → Google**, set a support email, and add your deployed domain under **Authorised domains**.
 3. Publish `firestore.rules` (Firebase CLI `firebase deploy --only firestore:rules`, or paste into the Rules tab) and `firestore.indexes.json` (`firebase deploy --only firestore:indexes`). Before any `firebase deploy`, run `firebase login`, then select your project with `firebase use --add` (or `firebase use <your-project-id>`) — no project is hard-coded in this repo. A root `firebase.json` points the CLI at the rules, indexes and site root.
 4. Copy your web app config into `firebase-config.js`. It ships pointing at the author's project, so you must replace every value with your own (Firebase console → Project settings → Your apps → SDK setup and configuration) or sign-in fails on an unauthorised domain and your data lands in someone else's project.
-5. Deploy to GitHub Pages or Firebase Hosting (`firebase deploy --only hosting`, after the login/use from step 3). No build step is needed.
+5. Deploy to GitHub Pages, Firebase Hosting (`firebase deploy --only hosting`, after the login/use from step 3), or Vercel (`vercel --prod --yes`). No build step is needed. Whatever host you choose, add its domain to **Authentication → Settings → Authorised domains** in Firebase — Google sign-in will fail on an unlisted domain even if the page loads.
 6. Sign in with Google, create an event, upload a small CSV, and test with two phones before the real event.
 
 ## Troubleshooting: "The database is temporarily unavailable"
