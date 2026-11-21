@@ -88,7 +88,7 @@ export function download(name, text, type = "text/csv") {
 }
 
 // ── QR as SVG (one path, runs merged) ──
-export function qrSvg(text, { fg = "#1A43B4", margin = 2, label = "QR code", ghost = null } = {}) {
+export function qrSvg(text, { fg = "#AFC0FF", margin = 2, label = "QR code", ghost = null } = {}) {
   const q = qrcode(0, "M");
   q.addData(text, "Byte");
   q.make();
@@ -136,13 +136,13 @@ export const I = {
   qr: s('<rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 14h2.5v2.5H14zM17.5 17.5H20V20h-2.5zM14 18.5V20M20 14v1.5"/>'),
   camera: s('<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.3l1.4-2h5.6l1.4 2h2.3A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/><circle cx="12" cy="12.8" r="3.4"/>'),
   // filled, from the comp
-  doc: `<svg viewBox="0 0 34 40" aria-hidden="true"><path fill="#1A43B4" d="M4 0h18l12 12v24a4 4 0 0 1-4 4H4a4 4 0 0 1-4-4V4a4 4 0 0 1 4-4z"/><path fill="#F8D5E4" d="M22 0v8a4 4 0 0 0 4 4h8z" opacity=".55"/><path stroke="#fff" stroke-width="3" stroke-linecap="round" d="M8 20h18M8 26h18M8 32h12"/></svg>`,
-  ticket: `<svg viewBox="0 0 48 34" aria-hidden="true"><g transform="rotate(-24 24 17)"><path fill="#F8D5E4" d="M6 7h36v6.2a3.8 3.8 0 0 0 0 7.6V27H6v-6.2a3.8 3.8 0 0 0 0-7.6z"/><path fill="#FF2FA2" d="M12.5 10.5h18v13h-18z" opacity=".55"/><path stroke="#FF2FA2" stroke-width="2" stroke-dasharray="2 2.6" d="M34 8.5v17"/></g></svg>`,
-  dotCheck: `<svg viewBox="0 0 50 50" aria-hidden="true"><circle cx="25" cy="25" r="25" fill="#FF2FA2"/><path d="m14.5 25.5 7 7 14-15" fill="none" stroke="#fff" stroke-width="4.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-  okDot: `<svg viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="26" fill="#fff"/><path d="m15 26.5 7.5 7.5L37.5 18.5" fill="none" stroke="#12844A" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-  xDot: `<svg viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="26" fill="#E0144C"/><path d="m18 18 16 16M34 18 18 34" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round"/></svg>`,
-  warnDot: `<svg viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="26" fill="#C50F72"/><path d="M26 14v15" stroke="#fff" stroke-width="5" stroke-linecap="round"/><circle cx="26" cy="37" r="3.2" fill="#fff"/></svg>`,
-  idleDot: `<svg viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="26" fill="#1A43B4"/><g fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round"><path d="M15 21v-6h6M31 15h6v6M37 31v6h-6M21 37h-6v-6"/><path d="M15 26h22" stroke="#FF2FA2"/></g></svg>`,
+  doc: `<svg viewBox="0 0 34 40" aria-hidden="true"><path fill="#AFC0FF" d="M4 0h18l12 12v24a4 4 0 0 1-4 4H4a4 4 0 0 1-4-4V4a4 4 0 0 1 4-4z"/><path fill="#2A1B33" d="M22 0v8a4 4 0 0 0 4 4h8z" opacity=".55"/><path stroke="#fff" stroke-width="3" stroke-linecap="round" d="M8 20h18M8 26h18M8 32h12"/></svg>`,
+  ticket: `<svg viewBox="0 0 48 34" aria-hidden="true"><g transform="rotate(-24 24 17)"><path fill="#2A1B33" d="M6 7h36v6.2a3.8 3.8 0 0 0 0 7.6V27H6v-6.2a3.8 3.8 0 0 0 0-7.6z"/><path fill="#FF4FB8" d="M12.5 10.5h18v13h-18z" opacity=".55"/><path stroke="#FF4FB8" stroke-width="2" stroke-dasharray="2 2.6" d="M34 8.5v17"/></g></svg>`,
+  dotCheck: `<svg viewBox="0 0 50 50" aria-hidden="true"><circle cx="25" cy="25" r="25" fill="#FF4FB8"/><path d="m14.5 25.5 7 7 14-15" fill="none" stroke="#fff" stroke-width="4.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  okDot: `<svg viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="26" fill="#fff"/><path d="m15 26.5 7.5 7.5L37.5 18.5" fill="none" stroke="#1B7A4B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  xDot: `<svg viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="26" fill="#FF5470"/><path d="m18 18 16 16M34 18 18 34" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round"/></svg>`,
+  warnDot: `<svg viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="26" fill="#FF7DC9"/><path d="M26 14v15" stroke="#fff" stroke-width="5" stroke-linecap="round"/><circle cx="26" cy="37" r="3.2" fill="#fff"/></svg>`,
+  idleDot: `<svg viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="26" fill="#AFC0FF"/><g fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round"><path d="M15 21v-6h6M31 15h6v6M37 31v6h-6M21 37h-6v-6"/><path d="M15 26h22" stroke="#FF4FB8"/></g></svg>`,
   bigCheck: `<svg viewBox="0 0 120 120" aria-hidden="true"><circle cx="60" cy="60" r="56" fill="none" stroke="#fff" stroke-width="8"/><path d="m34 62 17 17 36-38" fill="none" stroke="#fff" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   bigX: `<svg viewBox="0 0 120 120" aria-hidden="true"><circle cx="60" cy="60" r="56" fill="none" stroke="#fff" stroke-width="8"/><path d="m40 40 40 40M80 40 40 80" fill="none" stroke="#fff" stroke-width="11" stroke-linecap="round"/></svg>`,
   google: `<svg class="google" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.6-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3a12 12 0 0 1-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.6-.4-3.5z"/></svg>`,

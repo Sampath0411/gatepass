@@ -57,7 +57,7 @@ function shape(t) {
   t.querySelector(".t-shape").innerHTML = `
     <defs>
       <pattern id="gp-stock" patternUnits="userSpaceOnUse" width="512" height="512">
-        <rect width="512" height="512" fill="#F7CFDF"/><image href="${img("mottle.png")}" width="512" height="512"/>
+        <rect width="512" height="512" fill="#2A1B36"/><image href="${img("mottle.png")}" width="512" height="512"/>
       </pattern>
       <pattern id="gp-inkpat" patternUnits="userSpaceOnUse" width="256" height="256"><image href="${img("ink.png")}" width="256" height="256"/></pattern>
       <mask id="gp-ink" maskUnits="userSpaceOnUse" x="-10" y="-10" width="${W + 20}" height="${H + 20}" style="mask-type:alpha"><rect x="-10" y="-10" width="${W + 20}" height="${H + 20}" fill="url(#gp-inkpat)"/></mask>
@@ -68,8 +68,8 @@ function shape(t) {
     </defs>
     <g transform="translate(${k} ${k})">
       <path d="${d}" fill="url(#gp-stock)"/>
-      <path d="${d}" fill="none" stroke="#1A43B4" stroke-opacity=".3" stroke-width="2" transform="translate(1.3 1.1)" filter="url(#gp-rough)"/>
-      <g mask="url(#gp-ink)"><path d="${d}" fill="none" stroke="#FF2FA2" stroke-width="4.6" stroke-linejoin="round" filter="url(#gp-rough)"/></g>
+      <path d="${d}" fill="none" stroke="#AFC0FF" stroke-opacity=".3" stroke-width="2" transform="translate(1.3 1.1)" filter="url(#gp-rough)"/>
+      <g mask="url(#gp-ink)"><path d="${d}" fill="none" stroke="#FF4FB8" stroke-width="4.6" stroke-linejoin="round" filter="url(#gp-rough)"/></g>
     </g>`;
 }
 
@@ -90,7 +90,7 @@ function render(p) {
           ${ev.venue ? `<p class="t-where">${esc(ev.venue)}</p>` : ""}
         </div>
         <div class="t-qr">
-          ${qrSvg(passUrl(token), { label: `Entry QR for ${p.name}`, ghost: "#FF2FA2" })}
+          ${qrSvg(passUrl(token), { label: `Entry QR for ${p.name}`, ghost: "#FF4FB8" })}
           ${used ? `<div class="t-stamp"><div class="inked">Checked in<small>${esc(fmtTime(p.checked_in_at))} · ${esc(p.gate)}</small></div></div>` : ""}
         </div>
         <div class="t-tear" aria-hidden="true"></div>
