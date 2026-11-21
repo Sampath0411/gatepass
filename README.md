@@ -19,11 +19,19 @@ Made by [sampath.exe](https://github.com/sampath0411).
 
 | Who | What they do | Account? |
 |---|---|---|
-| **Organiser** | Signs in with Google, creates the event, uploads the registrations CSV (or pastes rows from Google Sheets). Gets one pass per row — copy/export the links, or tap the photo button on a row to share the full pass image (art, details and QR) straight to WhatsApp/email on mobile, or download it to attach manually. Watches "Checked in N / total" live. | Yes |
+| **Organiser** | Signs in with Google, creates the event, uploads the registrations CSV (or pastes rows from Google Sheets, or syncs a live Google Sheet). Gets one pass per row — copy/export the links, or tap the photo button on a row to share the full pass image (art, details and QR) straight to WhatsApp/email on mobile, or download it to attach manually. Watches "Checked in N / total" live. | Yes |
 | **Attendee** | Opens their link, shows the ticket at the gate, and can share or download the full pass photo from the pass page. A screenshot works too, once. | No |
 | **Gate staff** | Open `/gate/`, type the event's 8-character gate code, pick a gate name and point the camera at passes. "Find by name" covers dead phones. | No |
 
 GatePass sends no email or messages itself. Each pass row has copy, WhatsApp, photo and email buttons. The email button copies the full pass photo (with that person's name and QR) to your clipboard and opens Gmail — paste it into the message (Ctrl+V, or long-press → Paste) to include the image. On mobile it can share the image directly through your phone's share sheet instead. Browsers cannot attach files through a compose link, so this paste step is necessary.
+
+### WhatsApp delivery
+
+Every row whose contact is a phone number has a WhatsApp button: it opens `wa.me` with that person's pass link already written in — you tap Send in WhatsApp. The Passes panel also has a **WhatsApp delivery** box: **Send next on WhatsApp** opens one chat at a time (one tap per chat, so the browser never blocks it) and ticks each row off for the session, and **Copy all WhatsApp messages** copies every message for pasting by hand. Rows with no phone number are counted there too — use Email or Copy link for those. GatePass never sends a message on its own, uses no paid WhatsApp API, and stores no phone numbers beyond the contact column your sheet already has. Bare 10-digit Indian numbers get the `91` country code automatically.
+
+### Google Sheet live sync
+
+Instead of re-uploading the sheet, tap **Or sync from a Google Sheet** under registrations and paste the sheet link. GatePass reads the sheet as CSV (no API key, no Apps Script — the sheet just has to be shared: File → Share → Publish to web, or Anyone with the link can view). The rows land in the same preview as a file upload: check the name/contact columns, then tap Generate. People already on the list are skipped as duplicates — syncing never wipes existing passes, claims, or check-ins, so late Form responses just add new passes. The last synced link is remembered in that browser only. If the browser blocks the fetch, the error says so and the paste-rows box still works.
 
 ### Why a screenshot only works once
 

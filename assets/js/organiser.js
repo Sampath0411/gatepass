@@ -1,10 +1,10 @@
 // Organiser app: sign in, events, registrations → passes, links, gate code, live counter.
 import {
   configured, ART, artUrl, passUrl, gateUrl, fmtCode, fmtWhen, fmtTime, fmtDay, esc, plural,
-  copyText, toast, download, qrSvg, I, paintIcons, DB_MSG, escT, typo,
+  copyText, toast, download, qrSvg, I, paintIcons, DB_MSG, escT, typo, store,
 } from "./core.js";
 import * as fb from "./firebase.js";
-import { parseTable, analyse, toPasses, toCsv, isEmail, isPhone } from "./csv.js";
+import { parseTable, analyse, toPasses, toCsv, isEmail, isPhone, normalizePhone, sheetToCsvUrl, fetchSheetCsv } from "./csv.js";
 import { passImageBlob, shareOrDownload, copyImageToClipboard, gmailCompose } from "./pass-image.js";
 
 const view = document.getElementById("view");
@@ -245,9 +245,11 @@ async function eventView(id) {
   passes.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.name.localeCompare(b.name));
   // Only bounced comes from the staff-writable gate doc; the checked count and
   // per-pass stamps come from immutable claim docs.
-  const state = { ev, passes, first: new Map(), bounced: gate?.counts.bounced ?? 0, checked: 0, upload: null, filter: "", shown: 120 };
+  const state = { ev, passes, first: new Map(), bounced: gate?.counts.bounced ?? 0, checked: 0, upload: null, filter: "", shown: 120, waSent: new Set(), sheet: null };
   for (const claim of claims) if (claim.is_first) state.first.set(claim.pass_id, claim);
   state.checked = state.first.size;
+  // Remember this event's last synced Sheet link (this browser only).
+  state.sheet = store.get(`gp-sheet-${id}`, null);
 
   document.title = `${typo(ev.name)} · GatePass`;
   view.innerHTML = `
@@ -317,6 +319,13 @@ function renderReg(state) {
       <div id="pasteBox" class="stack" hidden>
         <textarea class="textarea" id="pasteTa" placeholder="Copy the cells in Google Sheets (with the header row) and paste here.&#10;Name, Email or Phone, …"></textarea>
         <button class="btn" type="button" id="pasteUse">Use these rows</button>
+      </div>
+      <button class="btn small" type="button" id="sheetBtn" style="align-self:flex-start">${I.refresh}Or sync from a Google Sheet</button>
+      <div id="sheetBox" class="stack" hidden>
+        <label class="field"><span>Google Sheet link</span><input class="input" id="sheetUrl" type="url" inputmode="url" placeholder="https://docs.google.com/spreadsheets/d/…/edit" value="${esc(state.sheet?.url || "")}"></label>
+        <p class="fine" style="margin:0">Live sync, no API key: the sheet must be shared — File → Share → Publish to web, or Anyone with the link can view. Syncing only fetches rows into the same preview below; nothing is generated until you tap Generate, and people already on the list are skipped, never wiped.</p>
+        <p class="fine" id="sheetMsg" style="margin:0" ${state.sheet?.lastAt ? "" : "hidden"}>${state.sheet?.lastAt ? `Last synced ${esc(fmtTime(state.sheet.lastAt))} · ${esc(state.sheet.lastNote || "")}` : ""}</p>
+        <div class="btns"><button class="btn" type="button" id="sheetSync">Sync sheet</button></div>
       </div>`;
     slot.querySelector("#file").addEventListener("change", async (e) => {
       const f = e.target.files?.[0];
@@ -330,6 +339,12 @@ function renderReg(state) {
       if (!box.hidden) slot.querySelector("#pasteTa").focus();
     });
     slot.querySelector("#pasteUse").addEventListener("click", () => loadRows(state, slot.querySelector("#pasteTa").value, "pasted rows"));
+    slot.querySelector("#sheetBtn").addEventListener("click", () => {
+      const box = slot.querySelector("#sheetBox");
+      box.hidden = !box.hidden;
+      if (!box.hidden) slot.querySelector("#sheetUrl").focus();
+    });
+    slot.querySelector("#sheetSync").addEventListener("click", () => syncSheet(state));
     return;
   }
 
@@ -376,6 +391,40 @@ function loadRows(state, text, fileName) {
   if (a.body.length > MAX_ROWS) return toast(`That's ${a.body.length} rows. GatePass takes up to ${MAX_ROWS} at a time.`, "x");
   state.upload = { a, fileName, nameCol: a.name, contactCol: a.contact, open: !a.hasHeader };
   renderReg(state);
+}
+
+// Google Sheet live sync: fetch the sheet as CSV and land it in the same
+// preview as a file upload, so the organiser reviews the columns and taps
+// Generate. Duplicates are skipped by toPasses (against the existing list),
+// and nothing already generated is touched. No API key, no Apps Script —
+// the sheet just has to be published/shared (see the hint under the box).
+async function syncSheet(state) {
+  const slot = view.querySelector("#regSlot");
+  const urlInput = slot.querySelector("#sheetUrl");
+  const msg = slot.querySelector("#sheetMsg");
+  const btn = slot.querySelector("#sheetSync");
+  const raw = urlInput.value.trim();
+  const csvUrl = sheetToCsvUrl(raw);
+  const showMsg = (text) => { msg.textContent = text; msg.hidden = false; };
+  if (!csvUrl) {
+    showMsg("That doesn't look like a Google Sheets link. Paste the link from your sheet's address bar.");
+    urlInput.focus();
+    return;
+  }
+  btn.disabled = true;
+  showMsg("Syncing…");
+  try {
+    const text = await fetchSheetCsv(csvUrl);
+    state.sheet = { url: raw, lastAt: new Date().toISOString(), lastNote: "synced — review the rows, then Generate" };
+    store.set(`gp-sheet-${state.ev.id}`, state.sheet);
+    loadRows(state, text, "Google Sheet");
+    toast("Sheet synced — review the rows, then Generate");
+  } catch (e) {
+    showMsg(`${e.message} If the fetch keeps failing, publish the sheet (File → Share → Publish to web) or paste the rows instead — the paste box above still works.`);
+    toast("Sheet sync failed", "x");
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function generate(state) {
@@ -473,12 +522,15 @@ function sendHref(state, p) {
   const c = p.contact || "";
   if (isEmail(c)) return { email: c, icon: I.mail, label: "Email" };
   if (isPhone(c)) {
-    let d = c.replace(/\D/g, "");
-    if (d.length === 10) d = "91" + d;          // assume India for bare 10-digit numbers
-    if (d.length === 11 && d.startsWith("0")) d = "91" + d.slice(1);
+    const d = normalizePhone(c);               // assume India for bare 10-digit numbers
+    if (!d) return null;
     return { href: `https://wa.me/${d}?text=${encodeURIComponent(msgFor(state, p))}`, icon: I.chat, label: "WhatsApp" };
   }
   return null;
+}
+// Passes with a phone number (WhatsApp) vs passes with no phone at all.
+function waPasses(state) {
+  return state.passes.filter((p) => isPhone(p.contact || ""));
 }
 
 function renderPassTools(state) {
@@ -493,7 +545,15 @@ function renderPassTools(state) {
       <button class="btn small" type="button" id="cpAll">${I.copy}Copy all links</button>
       <button class="btn small" type="button" id="csv">${I.download}Export CSV</button>
     </div>
-    <p class="fine" style="margin:0">GatePass sends nothing. Send each link yourself on WhatsApp or email; every link opens that person's pass.</p>
+    <p class="fine" style="margin:0">GatePass sends nothing itself. Send each link yourself on WhatsApp or email; every link opens that person's pass.</p>
+    <div class="stack" id="waBox" style="gap:8px">
+      <p class="fine" style="margin:0"><b>WhatsApp delivery</b> — ${waPasses(state).length} of ${state.passes.length} passes have a phone number${state.passes.length - waPasses(state).length ? `; ${state.passes.length - waPasses(state).length} have no phone — use Email or Copy link for those` : ""}. Each tap opens one WhatsApp chat with that person's pass already written in — you tap Send. Nothing is sent automatically.</p>
+      <div class="btns">
+        <button class="btn small" type="button" id="waNext">${I.chat}Send next on WhatsApp</button>
+        <button class="btn small" type="button" id="waCopyAll">${I.copy}Copy all WhatsApp messages</button>
+      </div>
+      <p class="fine" id="waStatus" style="margin:0">${state.waSent.size ? `${state.waSent.size} sent this session` : "Not started yet — the first tap opens the first phone number on the list."}</p>
+    </div>
     <div class="search"><span>${I.search}</span><input class="input" id="filter" placeholder="Search names" autocomplete="off" value="${esc(state.filter)}"></div>`;
   el.querySelector("#cpAll").addEventListener("click", async () => {
     const text = state.passes.map((p) => `${p.name}: ${passUrl(p.token)}`).join("\n");
@@ -507,6 +567,38 @@ function renderPassTools(state) {
     const slug = state.ev.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "event";
     download(`${slug}-passes.csv`, toCsv(rows));
   });
+  // WhatsApp delivery queue: one tap opens one chat (a real user gesture, so
+  // the browser won't block it). Sent rows are ticked off for this session
+  // only — nothing is stored, and GatePass never sends a message by itself.
+  const waStatus = () => {
+    const done = state.waSent.size, total = waPasses(state).length;
+    const statusEl = el.querySelector("#waStatus");
+    const nextBtn = el.querySelector("#waNext");
+    if (!total) {
+      statusEl.textContent = "No passes have a phone number yet — add a phone column when you upload, or use Email / Copy link for those rows.";
+      nextBtn.disabled = true;
+      return;
+    }
+    const next = waPasses(state).find((p) => !state.waSent.has(p.id));
+    statusEl.textContent = done >= total
+      ? `All ${total} WhatsApp passes opened. Reopen any row's WhatsApp button to resend one.`
+      : `${done} of ${total} sent this session — next: ${next.name}.`;
+    nextBtn.disabled = done >= total;
+  };
+  el.querySelector("#waNext").addEventListener("click", () => {
+    const next = waPasses(state).find((p) => !state.waSent.has(p.id));
+    if (!next) return waStatus();
+    const send = sendHref(state, next);
+    if (!send?.href) { state.waSent.add(next.id); return waStatus(); }
+    state.waSent.add(next.id);
+    window.open(send.href, "_blank", "noopener");
+    waStatus();
+  });
+  el.querySelector("#waCopyAll").addEventListener("click", async () => {
+    const text = waPasses(state).map((p) => msgFor(state, p)).join("\n\n");
+    (await copyText(text)) ? toast(`${plural(waPasses(state).length, "WhatsApp message")} copied`) : toast("Couldn't copy", "x");
+  });
+  waStatus();
   let t;
   el.querySelector("#filter").addEventListener("input", (e) => { clearTimeout(t); t = setTimeout(() => { state.filter = e.target.value; state.shown = 120; renderList(state); }, 120); });
 }

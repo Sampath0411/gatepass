@@ -27,6 +27,69 @@ const PHONE = /^\+?[\d\s().-]{7,20}$/;
 export const isEmail = (v) => EMAIL.test(v);
 export const isPhone = (v) => PHONE.test(v) && v.replace(/\D/g, "").length >= 7;
 
+// Normalise a phone number for wa.me: digits only, India numbers get the 91
+// country code (bare 10-digit, or 11-digit starting with 0). Numbers that are
+// already international are left as-is. Returns "" when there is no usable number.
+export function normalizePhone(contact = "") {
+  let d = String(contact || "").replace(/\D/g, "");
+  if (d.length < 7) return "";
+  if (d.length === 10) d = "91" + d;
+  else if (d.length === 11 && d.startsWith("0")) d = "91" + d.slice(1);
+  return d;
+}
+export const waNumber = (contact) => (isPhone(contact) ? normalizePhone(contact) : "");
+
+// ── Google Sheets live sync (no API key, no Apps Script) ────────────────
+// A published / shared Google Sheet can be read as plain CSV. Convert the
+// link an organiser pastes into the CSV export URL for that sheet.
+// Accepts: /spreadsheets/d/<id>/edit… (keeps ?gid= / #gid=), /pubhtml and
+// /pub links for published sheets, and an export?format=csv URL as-is.
+// Returns null when the input is not a Google Sheets link.
+export function sheetToCsvUrl(input = "") {
+  const raw = String(input || "").trim();
+  if (!raw) return null;
+  let u;
+  try { u = new URL(raw); } catch { return null; }
+  if (!/\.google\.com$/.test(u.hostname) && u.hostname !== "docs.google.com") return null;
+  if (!u.pathname.startsWith("/spreadsheets/d/")) return null;
+  const gid = u.searchParams.get("gid") || (u.hash.match(/gid=(\d+)/) || [])[1] || "";
+  const idMatch = u.pathname.match(/^\/spreadsheets\/d\/([^/]+)/);
+  if (!idMatch) return null;
+  const id = idMatch[1];
+  if (u.pathname.includes("/export")) {
+    // Already an export URL: keep it, but make sure it asks for CSV.
+    u.searchParams.set("format", "csv");
+    return u.href;
+  }
+  if (id === "e" || u.pathname.includes("/pub")) {
+    // Published sheet: /spreadsheets/d/e/<pubId>/pub…
+    return `https://docs.google.com/spreadsheets/d/e/${u.pathname.split("/")[4] || ""}/pub?output=csv${gid ? `&gid=${gid}` : ""}`;
+  }
+  return `https://docs.google.com/spreadsheets/d/${id}/export?format=csv${gid ? `&gid=${gid}` : ""}`;
+}
+
+// Fetch a sheet as CSV text. Throws a plain-English error when the sheet is
+// private, unpublished, or the browser blocks the request — the caller shows
+// the paste-rows fallback. `fetchImpl` exists only so tests can inject a fake.
+export async function fetchSheetCsv(url, fetchImpl = fetch) {
+  let res;
+  try {
+    res = await fetchImpl(url, { credentials: "omit" });
+  } catch {
+    throw new Error("Couldn't reach Google Sheets. Check your connection, or paste the rows instead.");
+  }
+  if (!res.ok) {
+    throw new Error(
+      res.status === 403 || res.status === 401
+        ? "That sheet isn't shared. In Google Sheets use File → Share → Publish to web (or Anyone with the link can view), then sync again."
+        : `Google Sheets returned ${res.status}. Check the link, or paste the rows instead.`
+    );
+  }
+  const text = await res.text();
+  if (!text.trim()) throw new Error("That sheet came back empty. Check the tab (gid) in the link, or paste the rows instead.");
+  return text;
+}
+
 const NAME_HDR = /^(full\s*name|name|your\s*(full\s*)?name|student\s*name|participant('?s)?\s*name|attendee\s*name|name\s*of\s*(the\s*)?(participant|student|attendee))$/i;
 const NAME_ANY = /name/i;
 const NAME_NOT = /college|club|team|institute|institution|school|university|event|father|mother|guardian|parent|user\s*name|file/i;

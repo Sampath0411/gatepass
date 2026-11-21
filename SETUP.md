@@ -7,6 +7,14 @@
 5. Deploy to GitHub Pages, Firebase Hosting (`firebase deploy --only hosting`, after the login/use from step 3), or Vercel (`vercel --prod --yes`). No build step is needed. Whatever host you choose, add its domain to **Authentication → Settings → Authorised domains** in Firebase — Google sign-in will fail on an unlisted domain even if the page loads.
 6. Sign in with Google, create an event, upload a small CSV, and test with two phones before the real event.
 
+## Sync registrations from a Google Sheet (no API key)
+
+1. In Google Sheets, open your responses sheet and use **File → Share → Publish to web** (or set sharing to Anyone with the link can view). A private sheet cannot be fetched.
+2. In GatePass, open the event and tap **Or sync from a Google Sheet** under registrations. Paste the sheet link (the address-bar link is fine — a `?gid=` / `#gid=` tab is kept) and tap **Sync sheet**.
+3. Review the preview exactly as for a file upload, pick the name/contact columns if needed, then tap **Generate**. Rows already on the list are skipped; nothing existing is wiped.
+4. When new Form responses arrive, tap **Sync sheet** again (the link is remembered in that browser) and generate the new passes.
+5. If the sync fails, the message says why — usually the sheet isn't published yet. The paste-rows box is the fallback: copy the cells in Sheets and paste them there.
+
 ## Troubleshooting: "The database is temporarily unavailable"
 
 If a signed-in organiser gets stuck loading an event, or sees this message, the Firestore client could not reach the backend. The usual cause is that **Cloud Firestore has not been enabled** for the project in `firebase-config.js` — the SDK then reports `5 NOT_FOUND` and goes permanently offline, so reads never settle.
@@ -54,6 +62,8 @@ Run this once against the deployed project before an event. Keep two phones (or 
 - [ ] **Create event** — add an event with a name, club, venue, date and artwork; confirm it appears in the list with a gate code.
 - [ ] **Paste 3 rows** — paste three `name, contact` rows into the registrations box; confirm all three are parsed and previewed.
 - [ ] **Generate passes** — create the passes; confirm the row count becomes 3 and each row has its own QR/link.
+- [ ] **WhatsApp delivery** — confirm the WhatsApp box counts the phone rows, **Send next on WhatsApp** opens one chat with the pass link pre-filled, and **Copy all WhatsApp messages** copies every message. Rows with no phone are counted, not silently skipped.
+- [ ] **Sheet sync** — paste a published Google Sheet link, tap **Sync sheet**, confirm the same preview appears with the 3 rows, and that syncing again with the same rows adds 0 new passes (duplicates skipped, existing passes untouched).
 - [ ] **Copy link** — copy one pass link and open it in another browser/profile; confirm the ticket shows the right name and event.
 - [ ] **Join gate** — on a second device open `/gate/`, enter the 8-character gate code, pick *Gate 1*, and confirm the counter reads `0 / 3`.
 - [ ] **Scan pass (green)** — scan/copy that pass's QR text into the gate; verdict reads *First scan* with the green `ok` style and the counter becomes `1 / 3`.
