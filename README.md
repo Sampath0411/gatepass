@@ -35,6 +35,7 @@ Every pass has a 32-character random token (192 bits), so links can't be guessed
 - **Attendees** need no account. They read their pass from `gp_passes/{token}`, where the 32-character token (192 bits) is the document ID and the capability. It returns just that one pass (name, event, check-in time) and never contact details or anyone else's pass.
 - **Gate staff** need no account either. The 8-character gate code is a path segment (`gp_gates/{code}`) acting as the capability — 31⁸ ≈ 850 billion combinations — and Rules only allow reading a gate doc that already exists, so codes can't be enumerated. The organiser can replace the code with one tap ("New code") and the old one stops working immediately. Staff search shows masked contacts only (`an•••@gmail.com`, `•••3210`).
 - **One-shot claims** live at `gp_gates/{code}/claims/{passId}`; the document ID makes each claim unique and Security Rules enforce a single create.
+- **The gate code is a full capability — guard it.** Anyone who holds the code can read that event's roster: attendee **names, masked contacts, pass tokens and the random device IDs** recorded on scans. Share the code only with gate staff you trust, and tap **New code** to revoke it immediately if it leaks.
 - Only the **public web config** is in `firebase-config.js`. It's designed to be shared; no service-account keys or secrets ever go in this repo.
 
 ---
@@ -43,13 +44,15 @@ Every pass has a 32-character random token (192 bits), so links can't be guessed
 
 You need a free [Firebase](https://firebase.google.com) account and a GitHub account (or Netlify / Vercel / Firebase Hosting). The console walkthrough is in [`SETUP.md`](SETUP.md); the short version:
 
+> ⚠️ **Before you fork or host your own copy:** [`firebase-config.js`](firebase-config.js) ships pointing at the author's Firebase project. You **must** replace every value with your own project's web config, or your data will be written to someone else's project and Google sign-in will fail with an *unauthorised domain* error.
+
 1. **Create a Firebase project.** console.firebase.google.com → **Add project**. Google Analytics is optional. Enable **Firestore Database** in production mode and pick a region close to your college.
 2. **Turn on Google sign-in.** **Authentication → Sign-in method → Google**, set a support email, and add your deployed site's domain under **Authentication → Settings → Authorised domains**. The hosted copy uses Google only.
-3. **Publish the rules and config.** Deploy [`firestore.rules`](firestore.rules) and [`firestore.indexes.json`](firestore.indexes.json) (Firebase CLI `firebase deploy --only firestore:rules,firestore:indexes`, or paste the rules into the Rules tab). Fork this repo and copy your web app config into [`firebase-config.js`](firebase-config.js) — **Project settings → Your apps → SDK setup and configuration**.
+3. **Publish the rules and config.** Before any `firebase deploy`, run `firebase login`, then select your project with `firebase use --add` (or `firebase use <your-project-id>`) — no project is hard-coded in this repo. Deploy [`firestore.rules`](firestore.rules) and [`firestore.indexes.json`](firestore.indexes.json) (Firebase CLI `firebase deploy --only firestore:rules,firestore:indexes`, or paste the rules into the Rules tab). Fork this repo and copy your web app config into [`firebase-config.js`](firebase-config.js) — **Project settings → Your apps → SDK setup and configuration**.
 4. **Publish the site.**
    - **GitHub Pages:** in your fork, **Settings → Pages → Build and deployment → Deploy from a branch → `main` / `(root)`**. Your site appears at `https://<you>.github.io/gatepass/`.
    - **Netlify / Vercel:** import the repo. There is no build command; the publish directory is the repo root.
-   - **Firebase Hosting:** `firebase deploy --only hosting` with the repo root as the public directory.
+   - **Firebase Hosting:** `firebase deploy --only hosting` with the repo root as the public directory (after the `firebase login` / `firebase use` from step 3).
 5. **Test it.** Sign in with Google, make an event, upload a small CSV, and do a test scan with two phones before the real event.
 
 ### Free-tier notes
