@@ -470,7 +470,13 @@ function msgFor(state, p) {
 }
 function sendHref(state, p) {
   const c = p.contact || "";
-  if (isEmail(c)) return { href: `mailto:${encodeURIComponent(c)}?subject=${encodeURIComponent(`Your pass for ${state.ev.name}`)}&body=${encodeURIComponent(msgFor(state, p))}`, icon: I.mail, label: "Email" };
+  if (isEmail(c)) {
+    // mailto: opens a blank tab when no mail app is configured — use Gmail compose instead.
+    return {
+      href: `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c)}&su=${encodeURIComponent(`Your pass for ${state.ev.name}`)}&body=${encodeURIComponent(msgFor(state, p))}`,
+      icon: I.mail, label: "Email",
+    };
+  }
   if (isPhone(c)) {
     let d = c.replace(/\D/g, "");
     if (d.length === 10) d = "91" + d;          // assume India for bare 10-digit numbers
