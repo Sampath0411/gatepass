@@ -242,6 +242,7 @@ test.describe("duplicate scan across two gate phones", () => {
   test.setTimeout(240000);
 
   test.beforeAll(async () => {
+    test.setTimeout(180000); // cold emulator starts can exceed the 30s hook default
     await startEmulator();
     await startStaticServer();
     env = await initializeTestEnvironment({
@@ -251,7 +252,7 @@ test.describe("duplicate scan across two gate phones", () => {
     // A claim left by an earlier run would turn the first scan into a duplicate.
     await env.clearFirestore();
     await seed();
-  }, 180000);
+  });
 
   test.afterAll(async () => {
     if (env) {

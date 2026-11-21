@@ -14,15 +14,19 @@ All collections are prefixed `gp_` so the project can be shared. The gate code a
 
 The duplicate-scan test seeds one event and one pass in a local emulator on port **8081** (the rules tests in `tests/firestore.test.js` use 8080), then drives two independent gate phones. It overrides the Firebase config and injects `connectFirestoreEmulator` from the test only — no source file is changed.
 
+Node / Playwright (run from `tests/` so Node resolves the local package):
+
 ```sh
-# Node / Playwright — run from tests/ so Node resolves the local package
 cd tests
 npm ci
 npx playwright install chromium
 npm run test:e2e
 # or: npx playwright test e2e/duplicate-scan.spec.js
+```
 
-# Python Playwright fallback (uses the already-installed system Python package)
+Python Playwright fallback (uses the already-installed system Python package; run from the **repo root**):
+
+```sh
 python tests/e2e/duplicate_scan.py
 ```
 

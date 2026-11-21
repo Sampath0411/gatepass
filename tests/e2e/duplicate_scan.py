@@ -215,7 +215,6 @@ def make_context(browser, base_url):
     def patch_data_layer(route):
         response = route.fetch()
         body = response.text()
-        original = body
         body, n1 = re.subn(
             r'serverTimestamp,\s*increment,\s*onSnapshot,\s*\} from "firebase/firestore";',
             'serverTimestamp, increment, onSnapshot, connectFirestoreEmulator,\n} from "firebase/firestore";',
