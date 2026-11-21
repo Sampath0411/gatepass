@@ -218,10 +218,20 @@ async function eventView(id) {
   view.innerHTML = `<div class="skeleton" style="height:520px"></div>`;
   let ev, passes, gate, claims = [];
   try {
-    ev = await fb.getEvent(id);
+    // Firestore reads can hang indefinitely when the backend is unreachable.
+    // Bound them so the page shows a real error instead of a permanent skeleton.
+    const withTimeout = (p) => Promise.race([
+      p,
+      new Promise((_, reject) => setTimeout(() => {
+        const e = new Error("The database didn't respond. Check your connection and try again.");
+        e.code = "deadline-exceeded";
+        reject(e);
+      }, 12000)),
+    ]);
+    ev = await withTimeout(fb.getEvent(id));
     if (!ev) { toast("That event isn't yours or was deleted", "x"); location.hash = ""; return; }
-    passes = await fb.getPasses(id);
-    gate = await fb.joinGate(ev.gate_code);
+    passes = await withTimeout(fb.getPasses(id));
+    gate = await withTimeout(fb.joinGate(ev.gate_code));
   } catch (e) { return fail(e); }
   try { claims = await fb.getClaims(ev.gate_code); } catch {}
 
