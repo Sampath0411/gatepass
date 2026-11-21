@@ -45,6 +45,8 @@ CODE = "E2E4PASS"
 EVENT = "e2e-event"
 TOKEN = "A" * 32
 PASS = "e2e-pass"
+TOKEN2 = "B" * 32  # distinct fresh pass used by the concurrent-scan test
+PASS2 = "e2e-pass-2"
 OWNER = "e2e-owner"
 
 
@@ -169,6 +171,14 @@ def start_static_server():
     return server, f"http://{HOST}:{server.server_address[1]}"
 
 
+def set_gate(total):
+    now = datetime.now(timezone.utc)
+    set_doc(f"gp_gates/{CODE}", {
+        "eventId": EVENT, "name": "E2E Night", "club": "Test Club", "venue": "Test Hall",
+        "art": 0, "startsAt": now, "total": total, "checked": 0, "bounced": 0, "recent": [],
+    })
+
+
 def seed():
     now = datetime.now(timezone.utc)
     starts_at = now.isoformat().replace("+00:00", "Z")
@@ -177,10 +187,7 @@ def seed():
         "ownerId": OWNER, "gateCode": CODE, "name": "E2E Night", "club": "Test Club",
         "venue": "Test Hall", "art": 0, "startsAt": now, "total": 1, "createdAt": now,
     })
-    set_doc(f"gp_gates/{CODE}", {
-        "eventId": EVENT, "name": "E2E Night", "club": "Test Club", "venue": "Test Hall",
-        "art": 0, "startsAt": now, "total": 1, "checked": 0, "bounced": 0, "recent": [],
-    })
+    set_gate(1)
     set_doc(f"gp_passes/{TOKEN}", {
         "id": PASS, "eventId": EVENT, "name": "Ada Lovelace",
         "event": {"name": "E2E Night", "club": "Test Club",
@@ -195,6 +202,27 @@ def seed():
         "name": "Ada Lovelace", "nameLower": "ada lovelace",
         "hint": "ad•••@example.com", "token": TOKEN, "checkedInAt": None, "gate": "",
     })
+
+
+def seed_second_pass():
+    """Add a second, fresh pass on the same gate for the concurrent-scan test."""
+    now = datetime.now(timezone.utc)
+    starts_at = now.isoformat().replace("+00:00", "Z")
+    set_doc(f"gp_passes/{TOKEN2}", {
+        "id": PASS2, "eventId": EVENT, "name": "Grace Hopper",
+        "event": {"name": "E2E Night", "club": "Test Club",
+                  "startsAt": starts_at, "venue": "Test Hall", "art": 0},
+        "checkedInAt": None, "gate": "",
+    })
+    set_doc(f"gp_events/{EVENT}/passes/{PASS2}", {
+        "name": "Grace Hopper", "contact": "grace@example.com", "token": TOKEN2,
+        "createdAt": now, "checkedInAt": None, "gate": "",
+    })
+    set_doc(f"gp_gates/{CODE}/roster/{PASS2}", {
+        "name": "Grace Hopper", "nameLower": "grace hopper",
+        "hint": "gr•••@example.com", "token": TOKEN2, "checkedInAt": None, "gate": "",
+    })
+    set_gate(2)
 
 
 def make_context(browser, base_url):
@@ -233,7 +261,7 @@ def make_context(browser, base_url):
     return context
 
 
-def join_gate(page, base_url, gate_name):
+def join_gate(page, base_url, gate_name, expected="0 / 1"):
     page.goto(base_url + "/gate/")
     expect(page.locator("#joinForm")).to_be_visible()
     page.locator("#code").fill(CODE)
@@ -241,7 +269,92 @@ def join_gate(page, base_url, gate_name):
     page.locator("#joinBtn").click()
     expect(page.locator("#scan")).to_be_visible()
     page.wait_for_function("() => !!window.GatePassGate", timeout=20000)
-    expect(page.locator("#cNum")).to_have_text("0 / 1")
+    expect(page.locator("#cNum")).to_have_text(expected)
+
+
+def test_sequential(browser, base_url):
+    """First scan green, every repeat red and counted."""
+    pass_url = f"{base_url}/p/#{TOKEN}"
+    phone1 = make_context(browser, base_url).new_page()
+    phone2 = make_context(browser, base_url).new_page()
+
+    join_gate(phone1, base_url, "Gate 1")
+    join_gate(phone2, base_url, "Gate 2")
+
+    # First phone: accepted.
+    phone1.evaluate("(u) => window.GatePassGate.handleText(u)", pass_url)
+    first = phone1.locator("#verdict")
+    expect(first).to_have_class(re.compile(r"\bok\b"))
+    expect(first).to_contain_text("First scan")
+    expect(phone1.locator("#cNum")).to_have_text("1 / 1")
+
+    # Second phone: rejected, citing the gate of the first scan.
+    phone2.evaluate("(u) => window.GatePassGate.handleText(u)", pass_url)
+    second = phone2.locator("#verdict")
+    expect(second).to_have_class(re.compile(r"\bdup\b"))
+    expect(second).to_contain_text("Already scanned")
+    expect(second).to_contain_text("first scan at Gate 1")
+    expect(second).to_contain_text("1 repeat")
+    expect(phone2.locator("#cNum")).to_have_text("1 / 1")
+
+    # Another repeat on the same phone bumps bounced again.
+    time.sleep(3.7)  # clear handleText's 3.5 s same-token de-dupe window
+    phone2.evaluate("(u) => window.GatePassGate.handleText(u)", pass_url)
+    expect(second).to_contain_text("2 repeats")
+
+    gate = get_doc(f"gp_gates/{CODE}")
+    assert int(gate["checked"]["integerValue"]) == 1, gate
+    assert int(gate["bounced"]["integerValue"]) == 2, gate
+    assert int(gate["total"]["integerValue"]) == 1, gate
+
+
+def test_concurrent(browser, base_url):
+    """Two phones scanning the same fresh pass at once: one ok, one dup."""
+    pass_url2 = f"{base_url}/p/#{TOKEN2}"
+    phone1 = make_context(browser, base_url).new_page()
+    phone2 = make_context(browser, base_url).new_page()
+
+    join_gate(phone1, base_url, "Gate 1", "0 / 2")
+    join_gate(phone2, base_url, "Gate 2", "0 / 2")
+
+    # The sync API cannot await two pages at once (no Promise.all). Schedule
+    # both scans for the same absolute instant so the two transactions really
+    # race, the way Promise.all does in the JS spec.
+    fire_at = (time.time() + 0.5) * 1000
+    fire = """([u, t]) => new Promise((resolve) => {
+        setTimeout(() => { window.GatePassGate.handleText(u); resolve(); },
+                   Math.max(0, t - Date.now()));
+    })"""
+    phone1.evaluate(fire, [pass_url2, fire_at])
+    phone2.evaluate(fire, [pass_url2, fire_at])
+
+    v1 = phone1.locator("#verdict")
+    v2 = phone2.locator("#verdict")
+    expect(v1).not_to_have_class("verdict idle")
+    expect(v2).not_to_have_class("verdict idle")
+
+    class1 = v1.get_attribute("class")
+    class2 = v2.get_attribute("class")
+    text1 = v1.text_content()
+    text2 = v2.text_content()
+
+    def kind(c):
+        if re.search(r"\bok\b", c):
+            return "ok"
+        if re.search(r"\bdup\b", c):
+            return "dup"
+        return "other"
+
+    kinds = [kind(class1), kind(class2)]
+    assert kinds.count("ok") == 1, (class1, class2, text1, text2)
+    assert kinds.count("dup") == 1, (class1, class2, text1, text2)
+    assert "First scan" in (text1 if kinds[0] == "ok" else text2)
+    assert "Already scanned" in (text1 if kinds[0] == "dup" else text2)
+
+    gate = get_doc(f"gp_gates/{CODE}")
+    assert int(gate["checked"]["integerValue"]) == 1, gate
+    assert int(gate["bounced"]["integerValue"]) == 1, gate
+    assert int(gate["total"]["integerValue"]) == 2, gate
 
 
 def main():
@@ -249,50 +362,24 @@ def main():
     server, base_url = start_static_server()
     try:
         load_rules()
-        clear_firestore()
-        seed()
-
         with sync_playwright() as p:
             browser = p.chromium.launch(args=[
                 "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
             ])
             try:
-                pass_url = f"{base_url}/p/#{TOKEN}"
-                phone1 = make_context(browser, base_url).new_page()
-                phone2 = make_context(browser, base_url).new_page()
+                # Reset per test so an earlier claim/counter cannot skew results.
+                clear_firestore()
+                seed()
+                test_sequential(browser, base_url)
 
-                join_gate(phone1, base_url, "Gate 1")
-                join_gate(phone2, base_url, "Gate 2")
-
-                # First phone: accepted.
-                phone1.evaluate("(u) => window.GatePassGate.handleText(u)", pass_url)
-                first = phone1.locator("#verdict")
-                expect(first).to_have_class(re.compile(r"\bok\b"))
-                expect(first).to_contain_text("First scan")
-                expect(phone1.locator("#cNum")).to_have_text("1 / 1")
-
-                # Second phone: rejected, citing the gate of the first scan.
-                phone2.evaluate("(u) => window.GatePassGate.handleText(u)", pass_url)
-                second = phone2.locator("#verdict")
-                expect(second).to_have_class(re.compile(r"\bdup\b"))
-                expect(second).to_contain_text("Already scanned")
-                expect(second).to_contain_text("first scan at Gate 1")
-                expect(second).to_contain_text("1 repeat")
-                expect(phone2.locator("#cNum")).to_have_text("1 / 1")
-
-                # Another repeat on the same phone bumps bounced again.
-                time.sleep(3.7)  # clear handleText's 3.5 s same-token de-dupe window
-                phone2.evaluate("(u) => window.GatePassGate.handleText(u)", pass_url)
-                expect(second).to_contain_text("2 repeats")
-
-                gate = get_doc(f"gp_gates/{CODE}")
-                assert int(gate["checked"]["integerValue"]) == 1, gate
-                assert int(gate["bounced"]["integerValue"]) == 2, gate
-                assert int(gate["total"]["integerValue"]) == 1, gate
+                clear_firestore()
+                seed()
+                seed_second_pass()
+                test_concurrent(browser, base_url)
             finally:
                 browser.close()
 
-        print("PASS: first scan green, repeat scans red, bounced == 2, counter 1 / 1")
+        print("PASS: sequential repeats red and concurrent scan yields one ok, one dup")
     finally:
         try:
             clear_firestore()

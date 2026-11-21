@@ -46,6 +46,8 @@ const CODE = "E2E4PASS";
 const EVENT = "e2e-event";
 const TOKEN = "A".repeat(32); // 32 chars is the real token shape; tokenFrom() accepts it
 const PASS = "e2e-pass";
+const TOKEN2 = "B".repeat(32); // distinct fresh pass used by the concurrent-scan test
+const PASS2 = "e2e-pass-2";
 const OWNER = "e2e-owner";
 
 const MIME = {
@@ -166,6 +168,28 @@ async function seed() {
   });
 }
 
+/** Seed a second, fresh pass on the same gate for the concurrent-scan test. */
+async function seedSecondPass() {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    const startsAt = new Date();
+    await db.doc(`gp_passes/${TOKEN2}`).set({
+      id: PASS2, eventId: EVENT, name: "Grace Hopper",
+      event: { name: "E2E Night", club: "Test Club", startsAt, venue: "Test Hall", art: 0 },
+      checkedInAt: null, gate: "",
+    });
+    await db.doc(`gp_events/${EVENT}/passes/${PASS2}`).set({
+      name: "Grace Hopper", contact: "grace@example.com", token: TOKEN2,
+      createdAt: startsAt, checkedInAt: null, gate: "",
+    });
+    await db.doc(`gp_gates/${CODE}/roster/${PASS2}`).set({
+      name: "Grace Hopper", nameLower: "grace hopper", hint: "gr•••@example.com",
+      token: TOKEN2, checkedInAt: null, gate: "",
+    });
+    await db.doc(`gp_gates/${CODE}`).update({ total: 2 });
+  });
+}
+
 async function readGate() {
   let result;
   await env.withSecurityRulesDisabled(async (ctx) => {
@@ -224,7 +248,7 @@ async function makeContext(browser) {
   return context;
 }
 
-async function joinGate(page, gateName) {
+async function joinGate(page, gateName, expectedCount = "0 / 1") {
   await page.goto("/gate/");
   await expect(page.locator("#joinForm")).toBeVisible();
   await page.locator("#code").fill(CODE);
@@ -232,7 +256,7 @@ async function joinGate(page, gateName) {
   await page.locator("#joinBtn").click();
   await expect(page.locator("#scan")).toBeVisible();
   await page.waitForFunction(() => !!window.GatePassGate, null, { timeout: 20000 });
-  await expect(page.locator("#cNum")).toHaveText("0 / 1");
+  await expect(page.locator("#cNum")).toHaveText(expectedCount);
 }
 
 // handleText() de-dupes the same token seen within 3.5 s on one phone.
@@ -249,7 +273,11 @@ test.describe("duplicate scan across two gate phones", () => {
       projectId: PROJECT,
       firestore: { rules: readFileSync(RULES, "utf8"), host: HOST, port: PORT },
     });
-    // A claim left by an earlier run would turn the first scan into a duplicate.
+  });
+
+  test.beforeEach(async () => {
+    // Reset per test so a claim/counter left by an earlier run cannot turn a
+    // first scan into a duplicate (or skew the gate's checked/bounced counts).
     await env.clearFirestore();
     await seed();
   });
@@ -297,5 +325,39 @@ test.describe("duplicate scan across two gate phones", () => {
     expect(gate.checked).toBe(1);
     expect(gate.bounced).toBe(2);
     expect(gate.total).toBe(1);
+  });
+
+  test("two phones scanning the same fresh pass at once: one ok, one dup", async ({ browser }) => {
+    await seedSecondPass();
+    const passUrl2 = `${baseUrl}/p/#${TOKEN2}`;
+    const phone1 = await (await makeContext(browser)).newPage();
+    const phone2 = await (await makeContext(browser)).newPage();
+
+    await joinGate(phone1, "Gate 1", "0 / 2");
+    await joinGate(phone2, "Gate 2", "0 / 2");
+
+    // No delay: both verdicts race for the single claim doc under that pass ID.
+    await Promise.all([scan(phone1, passUrl2), scan(phone2, passUrl2)]);
+
+    const v1 = phone1.locator("#verdict");
+    const v2 = phone2.locator("#verdict");
+    const class1 = await v1.getAttribute("class");
+    const class2 = await v2.getAttribute("class");
+    const text1 = await v1.textContent();
+    const text2 = await v2.textContent();
+    const kind = (c) => (/\bok\b/.test(c) ? "ok" : /\bdup\b/.test(c) ? "dup" : "other");
+    const kinds = [kind(class1), kind(class2)];
+
+    // Whichever phone wins, exactly one goes green and exactly one goes red.
+    expect(kinds.filter((k) => k === "ok")).toHaveLength(1);
+    expect(kinds.filter((k) => k === "dup")).toHaveLength(1);
+    expect(kinds[0] === "ok" ? text1 : text2).toContain("First scan");
+    expect(kinds[0] === "dup" ? text1 : text2).toContain("Already scanned");
+
+    // One first scan and one bounce landed on the gate doc for that pass.
+    const gate = await readGate();
+    expect(gate.checked).toBe(1);
+    expect(gate.bounced).toBe(1);
+    expect(gate.total).toBe(2);
   });
 });
