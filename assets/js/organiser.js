@@ -13,6 +13,20 @@ let live = null;
 
 const MAX_ROWS = 5000;
 
+// Firestore reads/writes can hang forever when the backend is unreachable
+// (e.g. Firestore not enabled for the project). Bound every call so the UI
+// always shows an error instead of a permanently disabled button or skeleton.
+function withTimeout(p, ms = 12000) {
+  return Promise.race([
+    p,
+    new Promise((_, reject) => setTimeout(() => {
+      const e = new Error("The database didn't respond. Check your connection and try again.");
+      e.code = "deadline-exceeded";
+      reject(e);
+    }, ms)),
+  ]);
+}
+
 // ─────────────────────────────────────────────── boot
 
 function notConfigured() {
@@ -103,10 +117,10 @@ async function listView() {
   view.innerHTML = `<div class="skeleton" style="height:220px"></div>`;
   let data;
   try {
-    const idx = await fb.listEvents(session.uid);
+    const idx = await withTimeout(fb.listEvents(session.uid));
     data = await Promise.all(idx.map(async (e) => {
-      const full = await fb.getEvent(e.id);
-      const gate = full ? await fb.joinGate(full.gate_code) : null;
+      const full = await withTimeout(fb.getEvent(e.id));
+      const gate = full ? await withTimeout(fb.joinGate(full.gate_code)) : null;
       return {
         id: e.id, name: full?.name || e.name, club: full?.club || "",
         starts_at: full?.starts_at || e.starts_at, venue: full?.venue || "",
@@ -155,7 +169,7 @@ async function eventForm(id = null) {
   let ev = { name: "", club: "", venue: "", art: 0, starts_at: null };
   if (id) {
     try {
-      const data = await fb.getEvent(id);
+      const data = await withTimeout(fb.getEvent(id));
       if (!data) { location.hash = ""; return; }
       ev = data;
     } catch (e) { return fail(e); }
@@ -196,10 +210,10 @@ async function eventForm(id = null) {
     let data;
     try {
       if (id) {
-        await fb.updateEvent(id, row);
+        await withTimeout(fb.updateEvent(id, row));
         data = { id };
       } else {
-        data = { id: await fb.createEvent(row) };
+        data = { id: await withTimeout(fb.createEvent(row)) };
       }
     } catch (e) {
       btn.disabled = false;
@@ -218,16 +232,6 @@ async function eventView(id) {
   view.innerHTML = `<div class="skeleton" style="height:520px"></div>`;
   let ev, passes, gate, claims = [];
   try {
-    // Firestore reads can hang indefinitely when the backend is unreachable.
-    // Bound them so the page shows a real error instead of a permanent skeleton.
-    const withTimeout = (p) => Promise.race([
-      p,
-      new Promise((_, reject) => setTimeout(() => {
-        const e = new Error("The database didn't respond. Check your connection and try again.");
-        e.code = "deadline-exceeded";
-        reject(e);
-      }, 12000)),
-    ]);
     ev = await withTimeout(fb.getEvent(id));
     if (!ev) { toast("That event isn't yours or was deleted", "x"); location.hash = ""; return; }
     passes = await withTimeout(fb.getPasses(id));
@@ -281,7 +285,7 @@ async function eventView(id) {
     if (Date.now() - armed > 4000) { armed = Date.now(); del.innerHTML = `${I.trash}Tap again to delete ${plural(state.passes.length, "pass", "passes")}`; setTimeout(() => { if (del.isConnected) del.innerHTML = `${I.trash}Delete event`; }, 4000); return; }
     del.disabled = true;
     try {
-      await fb.deleteEvent(id);
+      await withTimeout(fb.deleteEvent(id));
     } catch (e) {
       del.disabled = false;
       return toast(e.message, "x");
@@ -393,7 +397,7 @@ async function generate(state) {
   for (let i = 0; i < total; i += 100) {
     const batch = list.slice(i, i + 100).map((p) => ({ name: p.name, contact: p.contact }));
     try {
-      await fb.generatePasses(state.ev.id, batch, { name: state.ev.name, club: state.ev.club, starts_at: state.ev.starts_at, venue: state.ev.venue, art: state.ev.art, gateCode: state.ev.gate_code });
+      await withTimeout(fb.generatePasses(state.ev.id, batch, { name: state.ev.name, club: state.ev.club, starts_at: state.ev.starts_at, venue: state.ev.venue, art: state.ev.art, gateCode: state.ev.gate_code }), 30000);
     } catch (e) { failed = e; break; }
     done += batch.length;
   }
@@ -403,7 +407,7 @@ async function generate(state) {
   if (failed) toast(`Stopped after ${done}: ${failed.message}`, "x");
   else toast(`${plural(done, "pass", "passes")} ready`);
   try {
-    state.passes = await fb.getPasses(state.ev.id);
+    state.passes = await withTimeout(fb.getPasses(state.ev.id));
     state.passes.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.name.localeCompare(b.name));
   } catch {}
   renderReg(state); renderStat(state); renderPassTools(state); renderList(state);
@@ -444,7 +448,7 @@ function renderGate(state, showQr = false) {
     b.disabled = true;
     let data;
     try {
-      data = await fb.rotateCode(ev.id, ev.gate_code);
+      data = await withTimeout(fb.rotateCode(ev.id, ev.gate_code), 30000);
     } catch (e) {
       b.disabled = false;
       return toast(e.message || "Couldn't change the code", "x");
