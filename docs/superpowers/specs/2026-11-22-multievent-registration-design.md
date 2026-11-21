@@ -5,7 +5,7 @@ Status: approved for implementation planning
 
 ## Goal
 
-Turn GatePass from a single-event tool into a **fest platform**: one fest contains many sub-events, each with its own gate code, roster, one-shot claims and counter. Students sign in with Google, register for a sub-event through a public link, and receive that sub-event's pass immediately. Every registration is appended live to the organiser's Google Sheet via a small Apps Script web app they host themselves. The organiser sees all registrations across all sub-events in one table.
+Turn GatePass from a single-event tool into a **fest platform**: one fest contains many sub-events, each with its own gate code, roster, one-shot claims and counter. Students sign in with Google, register for a sub-event through a public link, and receive that sub-event's pass immediately. Every registration is appended live to the organiser's Google Sheet directly from the organiser's browser via the Sheets API (no server, no Apps Script). The organiser sees all registrations across all sub-events in one table.
 
 ## Constraints and decisions
 
@@ -26,7 +26,7 @@ Turn GatePass from a single-event tool into a **fest platform**: one fest contai
 | `gp_reg_public` | event ID | `{ festId, name, club, venue, art, startsAt, gateCode, registrationOpen, capacity, total }` | `get` if `request.auth != null`; no `list`; owner writes |
 | `gp_fests/{festId}/events/{eventId}/passes` | pass ID | full pass: `name`, `contact`, `token`, `uid`, `registrationId`, `createdAt`, `checkedInAt`, `gate` | owner read; student `create` only |
 | `gp_fests/{festId}/registrations` | auto ID | unified row: `eventId`, `eventName`, `name`, `email`, `phone`, `uid`, `passId`, `token`, `createdAt`, `sheetSynced` | owner read/update; student `create` only |
-| `gp_passes` | 32-char token | public projection: `id`, `festId`, `eventId`, `event` (display snapshot, **no** `gateCode`/webhook), `name`, `checkedInAt`, `gate` | `get: true`; owner-only update; student `create` |
+| `gp_passes` | 32-char token | public projection: `id`, `festId`, `eventId`, `event` (display snapshot, **no** `gateCode`), `name`, `checkedInAt`, `gate` | `get: true`; owner-only update; student `create` |
 | `gp_gates/{code}` | code | `eventId`, `festId`, display fields, `total`, `checked`, `bounced`, `recent` | `get` if exists; staff counter updates; owner create/delete |
 | `gp_gates/{code}/roster` | pass ID | `{ name, nameLower, hint, token, checkedInAt, gate }` | read by code; owner update; student `create` |
 | `gp_gates/{code}/claims` + `repeats` | pass ID / auto | unchanged one-shot claim + repeat log | unchanged rules |
