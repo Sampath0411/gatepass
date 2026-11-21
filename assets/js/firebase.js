@@ -400,53 +400,71 @@ export async function scanToken(code, token, gateName, device) {
   const pass = passSnap.data();
   if (pass.eventId !== gateSnap.data().eventId) return { status: "wrong_event" };
 
-  const result = await runTransaction(db, async (tx) => {
-    const g = await tx.get(gateRef);
-    const p = await tx.get(passRef);
-    const claimRef = doc(db, GATES, code, "claims", p.data().id);
-    const existing = await tx.get(claimRef);
-    const at = new Date().toISOString();
-    const recent = [{ name: p.data().name, passId: p.data().id, gate: gateName, is_first: !existing.exists(), at }];
+  // The claim ID is the pass ID. Derive it from the public pass doc we already
+  // read so the retry can re-check the same claim outside the transaction.
+  const claimRef = doc(db, GATES, code, "claims", pass.id);
+  let result;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      result = await runTransaction(db, async (tx) => {
+        const g = await tx.get(gateRef);
+        const p = await tx.get(passRef);
+        const existing = await tx.get(claimRef);
+        const at = new Date().toISOString();
+        const recent = [{ name: p.data().name, passId: p.data().id, gate: gateName, is_first: !existing.exists(), at }];
 
-    if (!existing.exists()) {
-      tx.set(claimRef, {
-        eventId: g.data().eventId, token, name: p.data().name,
-        gate: gateName, device, scannedAt: serverTimestamp(),
+        if (!existing.exists()) {
+          tx.set(claimRef, {
+            eventId: g.data().eventId, token, name: p.data().name,
+            gate: gateName, device, scannedAt: serverTimestamp(),
+          });
+          tx.update(passRef, { checkedInAt: serverTimestamp(), gate: gateName });
+          tx.update(doc(db, GATES, code, "roster", p.data().id),
+            { checkedInAt: serverTimestamp(), gate: gateName });
+          tx.update(gateRef, {
+            checked: increment(1),
+            recent: [recent[0], ...(g.data().recent || [])].slice(0, 6),
+          });
+          return { status: "ok", name: p.data().name, scanned_at: at,
+            counts: { ...countsOf(g.data()), checked: (g.data().checked || 0) + 1 } };
+        }
+
+        tx.set(doc(collection(db, GATES, code, "claims", p.data().id, "repeats")), {
+          eventId: g.data().eventId, gate: gateName, device, scannedAt: serverTimestamp(),
+        });
+        tx.update(gateRef, {
+          bounced: increment(1),
+          recent: [recent[0], ...(g.data().recent || [])].slice(0, 6),
+        });
+        // The existing claim was written by a PREVIOUS committed transaction, so its
+        // serverTimestamp is already resolved — unlike a claim written in this one.
+        // Prefer those authoritative values; fall back to the public pass doc only if
+        // a claim field is unexpectedly null (that doc is writable by any token holder).
+        const claim = existing.data();
+        const firstAt = stamp(claim.scannedAt) || stamp(p.data().checkedInAt) || at;
+        const firstGate = claim.gate || p.data().gate || "";
+        const firstDevice = claim.device;
+        return {
+          status: "dup", name: p.data().name,
+          first_at: firstAt, first_gate: firstGate,
+          same_device: firstDevice === device && !!device,
+          repeats: (g.data().bounced || 0) + 1,
+          counts: { ...countsOf(g.data()), bounced: (g.data().bounced || 0) + 1 },
+        };
       });
-      tx.update(passRef, { checkedInAt: serverTimestamp(), gate: gateName });
-      tx.update(doc(db, GATES, code, "roster", p.data().id),
-        { checkedInAt: serverTimestamp(), gate: gateName });
-      tx.update(gateRef, {
-        checked: increment(1),
-        recent: [recent[0], ...(g.data().recent || [])].slice(0, 6),
-      });
-      return { status: "ok", name: p.data().name, scanned_at: at,
-        counts: { ...countsOf(g.data()), checked: (g.data().checked || 0) + 1 } };
+      break;
+    } catch (e) {
+      // Two phones can read the claim as absent and race to create it. The loser's
+      // create is rejected by rules (!exists(claim)) with permission-denied, which
+      // the SDK does not auto-retry. If the winner's claim is now visible, re-run
+      // the transaction so this scan takes the dup branch.
+      if (e.code === "permission-denied" && attempt < 2) {
+        const claim = await getDoc(claimRef);
+        if (claim.exists()) continue;
+      }
+      throw e;
     }
-
-    tx.set(doc(collection(db, GATES, code, "claims", p.data().id, "repeats")), {
-      eventId: g.data().eventId, gate: gateName, device, scannedAt: serverTimestamp(),
-    });
-    tx.update(gateRef, {
-      bounced: increment(1),
-      recent: [recent[0], ...(g.data().recent || [])].slice(0, 6),
-    });
-    // The existing claim was written by a PREVIOUS committed transaction, so its
-    // serverTimestamp is already resolved — unlike a claim written in this one.
-    // Prefer those authoritative values; fall back to the public pass doc only if
-    // a claim field is unexpectedly null (that doc is writable by any token holder).
-    const claim = existing.data();
-    const firstAt = stamp(claim.scannedAt) || stamp(p.data().checkedInAt) || at;
-    const firstGate = claim.gate || p.data().gate || "";
-    const firstDevice = claim.device;
-    return {
-      status: "dup", name: p.data().name,
-      first_at: firstAt, first_gate: firstGate,
-      same_device: firstDevice === device && !!device,
-      repeats: (g.data().bounced || 0) + 1,
-      counts: { ...countsOf(g.data()), bounced: (g.data().bounced || 0) + 1 },
-    };
-  });
+  }
   return result;
 }
 
