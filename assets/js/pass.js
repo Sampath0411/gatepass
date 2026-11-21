@@ -77,6 +77,9 @@ function shape(t) {
 function render(p) {
   const ev = p.event;
   document.title = `${p.name} · ${typo(ev.name)} · GatePass`;
+  // NOTE (21 Nov 2026): checked_in_at on the pass doc is owner-only now —
+  // scans no longer set it, so this stamp only shows if the organiser sets
+  // it. The gate still blocks repeat scans via the one-shot claim doc.
   const used = !!p.checked_in_at;
   view.innerHTML = `
     <div class="ticket-wrap">

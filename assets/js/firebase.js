@@ -372,13 +372,25 @@ export async function gateFind(code, text) {
     if (e.code === "permission-denied") return [];
     throw e;
   }
-  return s.docs.map((d) => {
+  // SECURITY (21 Nov 2026): the token is NEVER returned to the gate UI.
+  // Only passId / name / hint / checked status leave this function. Checked
+  // status is derived from the one-shot claim doc (the authority), not from
+  // the roster stamp — the scan no longer writes that stamp.
+  return Promise.all(s.docs.map(async (d) => {
     const r = d.data();
+    let checkedInAt = null, gate = "";
+    try {
+      const claim = await getDoc(doc(db, GATES, code, "claims", d.id));
+      if (claim.exists()) {
+        checkedInAt = stamp(claim.data().scannedAt);
+        gate = claim.data().gate || "";
+      }
+    } catch {}
     return {
-      id: d.id, name: r.name, hint: r.hint, token: r.token,
-      checked_in_at: stamp(r.checkedInAt), gate: r.gate || "",
+      id: d.id, name: r.name, hint: r.hint,
+      checked_in_at: checkedInAt, gate,
     };
-  });
+  }));
 }
 
 export async function scanToken(code, token, gateName, device) {
@@ -418,9 +430,12 @@ export async function scanToken(code, token, gateName, device) {
             eventId: g.data().eventId, token, name: p.data().name,
             gate: gateName, device, scannedAt: serverTimestamp(),
           });
-          tx.update(passRef, { checkedInAt: serverTimestamp(), gate: gateName });
-          tx.update(doc(db, GATES, code, "roster", p.data().id),
-            { checkedInAt: serverTimestamp(), gate: gateName });
+          // SECURITY (21 Nov 2026): the scan writes ONLY the claim and the
+          // gate counters here. It deliberately does NOT update the pass doc
+          // or the roster stamp — those are owner-only in the rules now, so
+          // a stamp write would make every unauthenticated scan fail, and
+          // the old stamp writes were the fake-check-in hole. The claim is
+          // the single authority for "checked in".
           tx.update(gateRef, {
             checked: increment(1),
             recent: [recent[0], ...(g.data().recent || [])].slice(0, 6),
@@ -438,11 +453,11 @@ export async function scanToken(code, token, gateName, device) {
         });
         // The existing claim was written by a PREVIOUS committed transaction, so its
         // serverTimestamp is already resolved — unlike a claim written in this one.
-        // Prefer those authoritative values; fall back to the public pass doc only if
-        // a claim field is unexpectedly null (that doc is writable by any token holder).
+        // The claim is the only authority for the first scan; the public pass doc
+        // is no longer used as a fallback (its stamp is owner-only now).
         const claim = existing.data();
-        const firstAt = stamp(claim.scannedAt) || stamp(p.data().checkedInAt) || at;
-        const firstGate = claim.gate || p.data().gate || "";
+        const firstAt = stamp(claim.scannedAt) || at;
+        const firstGate = claim.gate || "";
         const firstDevice = claim.device;
         return {
           status: "dup", name: p.data().name,
@@ -473,7 +488,13 @@ function countsOf(d) {
 }
 
 export async function admitById(code, passId, gateName, device) {
-  // Read the token from the code-scoped roster; owner-only pass docs are not readable by staff.
+  // SECURITY (21 Nov 2026): the token is read from the code-scoped roster
+  // and used in-memory ONLY for this one scan call — it is never returned,
+  // rendered, logged or stored anywhere. Owner-only pass docs are not
+  // readable by staff, so the roster is the only place staff can get it;
+  // a code-holder calling the API directly can still read it — see the
+  // residual-risk note in firestore.rules. A Cloud Function is needed
+  // to close that fully.
   let r;
   try {
     r = await getDoc(doc(db, GATES, code, "roster", passId));

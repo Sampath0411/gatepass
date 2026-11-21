@@ -57,13 +57,18 @@ service cloud.firestore {
     }
 
     match /gp_gates/{code}/roster/{passId} {
+      // SECURITY (21 Nov 2026): roster reads stay code-gated because Find-by-name
+      // needs them, but the roster still stores the raw pass token — a code-holder
+      // calling the Firestore API directly can read it. That is a residual risk:
+      // only a Cloud Function (server-side scan) can fully hide the token.
+      // The client no longer returns or renders the token from gate search.
       allow read: if exists(/databases/$(database)/documents/gp_gates/$(code));
       allow create, delete: if isOwner(
         get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
-      allow update: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId)
-        || (exists(/databases/$(database)/documents/gp_gates/$(code))
-            && request.resource.data.diff(resource.data).affectedKeys()
-                 .hasOnly(['checkedInAt', 'gate']));
+      // Owner-only update. The scan transaction no longer writes the roster
+      // stamp: checked-in state is derived from the one-shot claim doc instead.
+      // A direct stamp write used to let anyone fake a check-in; it is closed.
+      allow update: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
     }
 
     // Attendee pass: the 32-char token is the doc ID and the capability.
@@ -71,10 +76,13 @@ service cloud.firestore {
       allow get: if true;
       allow list: if false;
       allow create: if isOwner(request.resource.data.eventId);
-      // Gate staff hold only the token (from the QR). They may flip the display
-      // stamp; the authoritative claim doc is still the one-shot gate.
-      allow update: if isOwner(resource.data.eventId)
-        || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['checkedInAt', 'gate']);
+      // SECURITY (21 Nov 2026): owner-only update. The old rule let any
+      // token-holder flip checkedInAt/gate on their own pass, faking a
+      // check-in on the pass page. The scan transaction no longer writes
+      // this stamp either — the one-shot claim doc is the only authority
+      // for "checked in". The pass page therefore no longer shows an
+      // "Already used" stamp from scans; the gate still blocks repeats.
+      allow update: if isOwner(resource.data.eventId);
       allow delete: if isOwner(resource.data.eventId);
     }
 

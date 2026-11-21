@@ -165,9 +165,15 @@ function key(name, contact) {
   return `${name.toLowerCase().replace(/\s+/g, " ").trim()}|${norm}`;
 }
 
+// SECURITY (21 Nov 2026): neutralise CSV/Excel formula injection (OWASP).
+// A cell starting with =, +, -, @, tab or carriage return — or with leading
+// spaces/tabs before one of those — is prefixed with a single quote so Excel
+// treats it as text instead of executing it as a formula. Registration names
+// and contacts come from untrusted form input, so every export goes through this.
 export function toCsv(rows) {
   return rows.map((r) => r.map((v) => {
-    const s = String(v ?? "");
+    let s = String(v ?? "");
+    if (/^[=+\-@\t\r]/.test(s) || /^[ \t]+[=+\-@]/.test(s)) s = `'${s}`;
     return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   }).join(",")).join("\r\n") + "\r\n";
 }

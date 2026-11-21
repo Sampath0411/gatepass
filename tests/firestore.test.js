@@ -2,7 +2,7 @@ import { test, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { initializeTestEnvironment, assertSucceeds, assertFails } from "@firebase/rules-unit-testing";
-import { serverTimestamp } from "firebase/firestore";
+import { serverTimestamp, runTransaction } from "firebase/firestore";
 
 const PROJECT = "gatepass-test", OWNER = "owner-uid", OTHER = "other-uid";
 const EVENT = "event-1", CODE = "ABCD2345", TOKEN = "A".repeat(32), PASS = "pass-1";
@@ -211,12 +211,57 @@ test("24. claim create denied when the pass belongs to a different event than th
   await assertFails(as(null).doc(`gp_gates/${CODE}/claims/${PASS}`).set({ ...claim(), token: badToken, eventId: EVENT }));
 });
 
-// ---- Positive staff stamp writes (25-26) ----
+// ---- Positive staff stamp writes (25-26) — REMOVED 21 Nov 2026 ----
+// The old rules let unauthenticated staff write only the stamp fields on a
+// pass / roster entry. That was the fake-check-in hole: any token-holder
+// could flip checkedInAt/gate without a scan. Both are owner-only now, and
+// the scan transaction no longer writes those stamps (the claim is the
+// authority). These tests now assert the direct writes are DENIED.
 
-test("25. unauthenticated staff may write only the stamp fields on a pass", async () => {
-  await assertSucceeds(as(null).doc(`gp_passes/${TOKEN}`).update({ checkedInAt: new Date(), gate: "Gate 1" }));
+test("25. unauthenticated user cannot set checkedInAt on a pass; owner can", async () => {
+  await assertFails(as(null).doc(`gp_passes/${TOKEN}`).update({ checkedInAt: new Date(), gate: "Gate 1" }));
+  await assertFails(as(OTHER).doc(`gp_passes/${TOKEN}`).update({ checkedInAt: new Date(), gate: "Gate 1" }));
+  await assertSucceeds(as(OWNER).doc(`gp_passes/${TOKEN}`).update({ checkedInAt: new Date(), gate: "Gate 1" }));
 });
 
-test("26. unauthenticated staff may write only the stamp fields on a roster entry", async () => {
-  await assertSucceeds(as(null).doc(`gp_gates/${CODE}/roster/${PASS}`).update({ checkedInAt: new Date(), gate: "Gate 1" }));
+test("26. unauthenticated user cannot mark a roster entry checked-in by direct write", async () => {
+  await assertFails(as(null).doc(`gp_gates/${CODE}/roster/${PASS}`).update({ checkedInAt: new Date(), gate: "Gate 1" }));
+  await assertFails(as(OTHER).doc(`gp_gates/${CODE}/roster/${PASS}`).update({ checkedInAt: new Date(), gate: "Gate 1" }));
+  await assertSucceeds(as(OWNER).doc(`gp_gates/${CODE}/roster/${PASS}`).update({ checkedInAt: new Date(), gate: "Gate 1" }));
+});
+
+// ---- Security fixes, 21 Nov 2026 (27-29) ----
+
+test("27. token-holder cannot fake a check-in even after a real claim exists", async () => {
+  await seedClaim();
+  // The claim exists now, but the pass stamp is still owner-only.
+  await assertFails(as(null).doc(`gp_passes/${TOKEN}`).update({ checkedInAt: new Date(), gate: "Gate 2" }));
+  await assertFails(as(null).doc(`gp_passes/${TOKEN}`).update({ gate: "Gate 2" }));
+});
+
+test("28. gate staff cannot mark a pass checked-in on the roster, with or without a claim", async () => {
+  await assertFails(as(null).doc(`gp_gates/${CODE}/roster/${PASS}`).update({ checkedInAt: new Date(), gate: "Gate 1" }));
+  await seedClaim();
+  await assertFails(as(null).doc(`gp_gates/${CODE}/roster/${PASS}`).update({ checkedInAt: new Date(), gate: "Gate 1" }));
+  await assertFails(as(null).doc(`gp_gates/${CODE}/roster/${PASS}`).update({ gate: "Gate 1" }));
+});
+
+test("29. first scan + repeat scan still work as transactions (claim + gate counters only)", async () => {
+  const db = as(null);
+  // First scan: create the one-shot claim, bump the gate counter.
+  await assertSucceeds(runTransaction(db, async (tx) => {
+    const existing = await tx.get(db.doc(`gp_gates/${CODE}/claims/${PASS}`));
+    assert.equal(existing.exists(), false);
+    tx.set(db.doc(`gp_gates/${CODE}/claims/${PASS}`), claim());
+    tx.update(db.doc(`gp_gates/${CODE}`), { checked: 1, recent: [] });
+  }));
+  // Repeat scan: claim already exists, so write a repeat + bump bounced.
+  await assertSucceeds(runTransaction(db, async (tx) => {
+    const existing = await tx.get(db.doc(`gp_gates/${CODE}/claims/${PASS}`));
+    assert.equal(existing.exists(), true);
+    tx.set(db.doc(REPEAT), repeat());
+    tx.update(db.doc(`gp_gates/${CODE}`), { bounced: 1, recent: [] });
+  }));
+  // And the claim itself still cannot be overwritten (second first-scan).
+  await assertFails(as(null).doc(`gp_gates/${CODE}/claims/${PASS}`).set(claim()));
 });
