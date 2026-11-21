@@ -19,8 +19,8 @@ Made by [sampath.exe](https://github.com/sampath0411).
 
 | Who | What they do | Account? |
 |---|---|---|
-| **Organiser** | Signs in with Google, creates the event, uploads the registrations CSV (or pastes rows from Google Sheets). Gets one pass per row and copies or exports every link to send on WhatsApp or email. Watches "Checked in N / total" live. | Yes |
-| **Attendee** | Opens their link and shows the ticket at the gate. A screenshot works too, once. | No |
+| **Organiser** | Signs in with Google, creates the event, uploads the registrations CSV (or pastes rows from Google Sheets). Gets one pass per row — copy/export the links, or tap the photo button on a row to share the full pass image (art, details and QR) straight to WhatsApp/email on mobile, or download it to attach manually. Watches "Checked in N / total" live. | Yes |
+| **Attendee** | Opens their link, shows the ticket at the gate, and can share or download the full pass photo from the pass page. A screenshot works too, once. | No |
 | **Gate staff** | Open `/gate/`, type the event's 8-character gate code, pick a gate name and point the camera at passes. "Find by name" covers dead phones. | No |
 
 GatePass sends no email or messages itself. Each pass row has WhatsApp / email / copy buttons that open your own app with the message filled in.

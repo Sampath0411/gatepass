@@ -135,6 +135,7 @@ export const I = {
   user: s('<circle cx="12" cy="8.5" r="3.8"/><path d="M4.5 20c1.2-3.8 4-5.6 7.5-5.6s6.3 1.8 7.5 5.6"/>'),
   qr: s('<rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 14h2.5v2.5H14zM17.5 17.5H20V20h-2.5zM14 18.5V20M20 14v1.5"/>'),
   camera: s('<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.3l1.4-2h5.6l1.4 2h2.3A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/><circle cx="12" cy="12.8" r="3.4"/>'),
+  image: s('<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="m4.5 17 4.5-4.5 3.5 3.5 2.5-2.5 4.5 4.5"/>'),
   // filled, from the comp
   doc: `<svg viewBox="0 0 34 40" aria-hidden="true"><path fill="#AFC0FF" d="M4 0h18l12 12v24a4 4 0 0 1-4 4H4a4 4 0 0 1-4-4V4a4 4 0 0 1 4-4z"/><path fill="#2A1B33" d="M22 0v8a4 4 0 0 0 4 4h8z" opacity=".55"/><path stroke="#fff" stroke-width="3" stroke-linecap="round" d="M8 20h18M8 26h18M8 32h12"/></svg>`,
   ticket: `<svg viewBox="0 0 48 34" aria-hidden="true"><g transform="rotate(-24 24 17)"><path fill="#2A1B33" d="M6 7h36v6.2a3.8 3.8 0 0 0 0 7.6V27H6v-6.2a3.8 3.8 0 0 0 0-7.6z"/><path fill="#FF4FB8" d="M12.5 10.5h18v13h-18z" opacity=".55"/><path stroke="#FF4FB8" stroke-width="2" stroke-dasharray="2 2.6" d="M34 8.5v17"/></g></svg>`,

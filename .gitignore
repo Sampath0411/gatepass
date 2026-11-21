@@ -21,3 +21,4 @@ tests/e2e/firebase-debug.log
 tests/e2e/firestore-debug.log
 tests/test-results/
 tests/playwright-report/
+.vercel

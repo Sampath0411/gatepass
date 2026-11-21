@@ -5,6 +5,7 @@ import {
 } from "./core.js";
 import * as fb from "./firebase.js";
 import { parseTable, analyse, toPasses, toCsv, isEmail, isPhone } from "./csv.js";
+import { passImageBlob, shareOrDownload } from "./pass-image.js";
 
 const view = document.getElementById("view");
 const roleEl = document.getElementById("role");
@@ -525,6 +526,7 @@ function rowHtml(state, p) {
       <p class="pl-meta">${s ? `<span class="in">In ${esc(fmtTime(s.scanned_at))} · ${esc(s.gate)}</span> · ` : ""}${esc(p.contact || "no contact")}</p>
       <div class="pl-actions">
         ${send ? `<a class="icon-btn" href="${esc(send.href)}" target="_blank" rel="noopener" aria-label="${send.label} ${esc(p.name)} their pass" title="${send.label}">${send.icon}</a>` : ""}
+        <button class="icon-btn" type="button" data-image="${esc(p.token)}" aria-label="Share ${esc(p.name)}'s pass photo" title="Share pass photo">${I.image}</button>
         <button class="icon-btn" type="button" data-copy="${esc(p.token)}" aria-label="Copy ${esc(p.name)}'s pass link" title="Copy link">${I.copy}</button>
         <a class="icon-btn" href="${esc(passUrl(p.token))}" target="_blank" rel="noopener" aria-label="Open ${esc(p.name)}'s pass" title="Open pass">${I.open}</a>
       </div>
@@ -540,6 +542,24 @@ function renderList(state) {
   more.innerHTML = list.length > state.shown ? `<button class="btn small" type="button" id="moreBtn">Show ${Math.min(240, list.length - state.shown)} more of ${list.length - state.shown}</button>` : "";
   more.querySelector("#moreBtn")?.addEventListener("click", () => { state.shown += 240; renderList(state); });
   ul.onclick = async (e) => {
+    const img = e.target.closest("[data-image]");
+    if (img) {
+      const p = state.passes.find((x) => x.token === img.dataset.image);
+      if (!p) return;
+      img.disabled = true;
+      try {
+        const s = state.first.get(p.id);
+        const blob = await passImageBlob({
+          name: p.name,
+          event: { name: state.ev.name, club: state.ev.club, starts_at: state.ev.starts_at, venue: state.ev.venue, art: state.ev.art },
+          checked_in_at: s?.scanned_at, gate: s?.gate,
+        }, p.token);
+        const result = await shareOrDownload(blob, `gatepass-${p.name.replace(/[^A-Za-z0-9]+/g, "-")}.png`, `${p.name}'s GatePass for ${state.ev.name}`);
+        toast(result === "shared" ? "Pass photo shared" : result === "cancelled" ? "Share cancelled" : "Pass photo downloaded");
+      } catch (err) { toast("Couldn't make the pass photo: " + err.message, "x"); }
+      finally { img.disabled = false; }
+      return;
+    }
     const b = e.target.closest("[data-copy]");
     if (!b) return;
     (await copyText(passUrl(b.dataset.copy))) ? toast("Pass link copied") : toast("Couldn't copy", "x");

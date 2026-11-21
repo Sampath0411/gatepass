@@ -1,5 +1,6 @@
 // The attendee's pass. Public at /p/#<token>; reads only its own public pass document.
 import { configured, esc, escT, typo, fmtWhen, fmtTime, qrSvg, setArt, passUrl, copyText, toast, I, ROOT, DB_MSG } from "./core.js";
+import { passImageBlob, shareOrDownload } from "./pass-image.js";
 import * as fb from "./firebase.js";
 
 const view = document.getElementById("view");
@@ -103,6 +104,7 @@ function render(p) {
         : "Turn your brightness up at the gate. A screenshot works too, but only once: the first scan lets you in."}</p>
     </div>
     <div class="pass-actions">
+      <button class="btn small" type="button" id="shareImg">${I.image}Share pass photo</button>
       <button class="btn small" type="button" id="copy">${I.link}Copy pass link</button>
     </div>`;
   const t = view.querySelector(".ticket");
@@ -112,6 +114,16 @@ function render(p) {
   document.fonts?.ready.then(() => shape(t));
   view.querySelector("#copy").addEventListener("click", async () => {
     (await copyText(passUrl(token))) ? toast("Pass link copied") : toast("Couldn't copy. Long-press the address bar.", "x");
+  });
+  view.querySelector("#shareImg").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      const blob = await passImageBlob({ name: p.name, event: ev, checked_in_at: p.checked_in_at, gate: p.gate }, token);
+      const result = await shareOrDownload(blob, `gatepass-${p.name.replace(/[^A-Za-z0-9]+/g, "-")}.png`, `My GatePass for ${ev.name}`);
+      toast(result === "shared" ? "Pass photo shared" : result === "cancelled" ? "Share cancelled" : "Pass photo downloaded");
+    } catch (err) { toast("Couldn't make the pass photo: " + err.message, "x"); }
+    finally { btn.disabled = false; }
   });
   keepAwake();
 }
