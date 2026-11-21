@@ -38,7 +38,7 @@ function notConfigured() {
         <li>Enable Firestore and Google sign-in (see <b>SETUP.md</b>).</li>
         <li>Put your web config in <b>firebase-config.js</b>.</li>
       </ol>
-      <a class="btn" href="https://github.com/Souradip121/gatepass#host-your-own-copy-free-5-steps" rel="noopener">Read the 5-step guide ${I.open}</a>
+      <a class="btn" href="https://github.com/sampath0411" rel="noopener">Read the 5-step guide ${I.open}</a>
     </section>`;
   view.querySelector("#art").style.backgroundImage = `url("${artUrl(0)}")`;
 }
@@ -98,7 +98,7 @@ function signInView(errMsg = "") {
         <p class="fine" style="margin:0">Organisers sign in with Google. Gate staff and attendees never need an account.</p>
         <div class="links" style="margin-top:8px">
           <a href="gate/">${I.qr} Gate staff? Join with a code</a>
-          <a href="https://github.com/Souradip121/gatepass" rel="noopener">${I.open} Host your own copy</a>
+          <a href="https://github.com/sampath0411" rel="noopener">${I.open} Host your own copy</a>
         </div>
       </div>
     </section>`;

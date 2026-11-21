@@ -11,7 +11,7 @@
   <img src="screenshots/gate-red.png" alt="Gate scanner showing a repeat scan in red: Already scanned" width="250">
 </p>
 
-Made by [@souradip.sh](https://www.instagram.com/souradip.sh/).
+Made by [sampath.exe](https://github.com/sampath0411).
 
 ---
 
