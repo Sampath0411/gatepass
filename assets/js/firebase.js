@@ -662,6 +662,15 @@ export function watchRegistrations(festId, cb) {
 // ── Luma-style events v2 + RSVPs ──
 const V2 = "gp_events_v2", RSVPS = "gp_rsvps", RSVP_SUB = "rsvps", CREATED = "createdEvents";
 
+// Preset registration fields. Events may override this list per event; older
+// events with no stored list fall back to these.
+export const DEFAULT_FORM_FIELDS = [
+  { key: "name", label: "Full name", type: "text", required: true, enabled: true },
+  { key: "email", label: "Email", type: "email", required: true, enabled: true },
+  { key: "phone", label: "Phone number", type: "tel", required: false, enabled: true },
+  { key: "college", label: "College", type: "text", required: false, enabled: true },
+];
+
 function toTime(v) {
   if (v === undefined || v === null || v === "") return null;
   if (v instanceof Date) return v;
@@ -685,6 +694,7 @@ function v2Event(s) {
     approval: !!d.approval, capacity: d.capacity || 0,
     visibility: d.visibility === "private" ? "private" : "public",
     createdAt: stamp(d.createdAt),
+    formFields: d.formFields || DEFAULT_FORM_FIELDS,
   };
 }
 
@@ -706,6 +716,7 @@ export async function createV2Event(row) {
     capacity: Number(row.capacity) || 0,
     visibility: row.visibility === "private" ? "private" : "public",
     createdAt: serverTimestamp(),
+    formFields: row.formFields || DEFAULT_FORM_FIELDS,
   };
   const batch = writeBatch(db);
   batch.set(doc(db, V2, id), event);
@@ -737,6 +748,7 @@ export async function updateV2Event(id, row) {
   }
   if (row.approval !== undefined) patch.approval = !!row.approval;
   if (row.capacity !== undefined) patch.capacity = Number(row.capacity) || 0;
+  if (row.formFields !== undefined) patch.formFields = row.formFields || DEFAULT_FORM_FIELDS;
   if (row.startsAt !== undefined || row.starts_at !== undefined) {
     patch.startsAt = toTime(row.startsAt ?? row.starts_at);
   }
@@ -772,20 +784,41 @@ export async function deleteV2Event(id) {
   await batch.commit();
 }
 
-export async function rsvpEvent(eventId, user) {
+export async function rsvpEvent(eventId, user, answers = {}) {
   const u = user || auth.currentUser;
   const uid = u?.uid;
   if (!uid) throw new Error("Sign in required");
   await setDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid), {
-    uid, name: u.displayName || "", email: u.email || "",
+    name: answers.name ?? u.displayName ?? "",
+    email: answers.email ?? u.email ?? "",
+    phone: answers.phone ?? "",
+    college: answers.college ?? "",
+    answers,
     at: serverTimestamp(),
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
   });
+}
+
+export async function updateRsvp(eventId, uid, answers = {}) {
+  await updateDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid), {
+    name: answers.name ?? "",
+    email: answers.email ?? "",
+    phone: answers.phone ?? "",
+    college: answers.college ?? "",
+    answers,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function deleteRsvp(eventId, uid) {
+  await deleteDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid));
 }
 
 export async function cancelRsvp(eventId, user) {
   const uid = user?.uid || auth.currentUser?.uid;
   if (!uid) throw new Error("Sign in required");
-  await deleteDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid));
+  await deleteRsvp(eventId, uid);
 }
 
 export async function listRsvps(eventId) {

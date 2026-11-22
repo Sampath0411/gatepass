@@ -204,8 +204,12 @@ service cloud.firestore {
     match /gp_rsvps/{eventId}/rsvps/{uid} {
       allow read: if get(/databases/$(database)/documents/gp_events_v2/$(eventId)).data.visibility == 'public'
         || isOwnerEventV2(eventId);
-      allow create, delete: if signedIn() && uid == request.auth.uid;
-      allow update: if false;
+      // Only the member themselves may create an RSVP. Once created, either the
+      // event owner (member directory edits) or the member (own details) may
+      // update/delete it.
+      allow create: if signedIn() && uid == request.auth.uid;
+      allow update: if isOwnerEventV2(eventId) || (signedIn() && uid == request.auth.uid);
+      allow delete: if isOwnerEventV2(eventId) || (signedIn() && uid == request.auth.uid);
     }
   }
 }
