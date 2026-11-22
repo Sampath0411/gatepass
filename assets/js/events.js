@@ -642,6 +642,9 @@ async function doDelete(id) {
 // ── routing / events ────────────────────────────────────────────────────────
 async function route() {
   const seq = ++renderSeq;
+  // RSVP counts can change in another browser while this page is open; never
+  // reuse a cached count across in-app (hash) navigation.
+  state.rsvps = {};
   const h = location.hash.replace(/^#\/?/, "");
   const r = currentRoute();
   const wide = r === "create" || r === "event" ? " l-main-wide" : "";
