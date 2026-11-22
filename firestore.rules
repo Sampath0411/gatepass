@@ -176,5 +176,36 @@ service cloud.firestore {
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.keys().hasOnly(['eventId','eventName','festId','name','email','phone','uid','passId','token','createdAt','sheetSynced']);
     }
+
+    // ── Luma-style events v2 + RSVPs ──
+    function isOwnerEventV2(eventId) {
+      return signedIn()
+        && get(/databases/$(database)/documents/gp_events_v2/$(eventId)).data.ownerId == request.auth.uid;
+    }
+
+    match /gp_events_v2/{eventId} {
+      allow get: if resource.data.visibility == 'public' || isOwnerEventV2(eventId);
+      // Rules are NOT filters: public list queries must carry
+      // where("visibility","==","public"). Owner lists use the
+      // gp_users/{uid}/createdEvents index below instead of querying this path.
+      allow list: if resource.data.visibility == 'public' || isOwnerEventV2(eventId);
+      allow create: if signedIn() && request.resource.data.ownerId == request.auth.uid;
+      allow update, delete: if isOwnerEventV2(eventId);
+    }
+
+    // Owner-scoped index for private events — written in the same batch as the event.
+    match /gp_users/{uid}/createdEvents/{eventId} {
+      allow read, create, update, delete: if signedIn() && uid == request.auth.uid;
+    }
+
+    // NOTE: a Firestore document path needs an even number of segments, so the
+    // plan's gp_rsvps/{eventId}/{uid} is not a valid doc path. Use the rsvps
+    // subcollection level; {uid} remains the RSVP doc id.
+    match /gp_rsvps/{eventId}/rsvps/{uid} {
+      allow read: if get(/databases/$(database)/documents/gp_events_v2/$(eventId)).data.visibility == 'public'
+        || isOwnerEventV2(eventId);
+      allow create, delete: if signedIn() && uid == request.auth.uid;
+      allow update: if false;
+    }
   }
 }

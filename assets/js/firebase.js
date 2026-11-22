@@ -5,7 +5,7 @@ import {
 } from "firebase/auth";
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
-  collection, query, where, limit, writeBatch, runTransaction,
+  collection, query, where, orderBy, limit, writeBatch, runTransaction,
   serverTimestamp, increment, onSnapshot,
 } from "firebase/firestore";
 
@@ -656,5 +656,142 @@ export function watchRegistrations(festId, cb) {
   return onSnapshot(collection(db, "gp_fests", festId, "registrations"), (snap) => {
     cb(snap.docs.map((d) => ({ id: d.id, ...d.data(), created_at: stamp(d.data().createdAt),
       sheet_synced: !!d.data().sheetSynced })));
+  });
+}
+
+// ── Luma-style events v2 + RSVPs ──
+const V2 = "gp_events_v2", RSVPS = "gp_rsvps", RSVP_SUB = "rsvps", CREATED = "createdEvents";
+
+function toTime(v) {
+  if (v === undefined || v === null || v === "") return null;
+  if (v instanceof Date) return v;
+  if (typeof v === "object" && typeof v.toDate === "function") return v; // already a Timestamp
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+// Shaping happens here so the UI never has to touch Firestore Timestamp objects.
+// `starts_at`/`ends_at` and `name` are kept as aliases for existing UI helpers.
+function v2Event(s) {
+  const d = s.data();
+  const starts = stamp(d.startsAt), ends = stamp(d.endsAt);
+  return {
+    id: s.id, ownerId: d.ownerId,
+    title: d.title || "", name: d.title || "",
+    cover: d.cover || "crowd",
+    startsAt: starts, endsAt: ends, starts_at: starts, ends_at: ends,
+    timezone: d.timezone || "", location: d.location || "",
+    description: d.description || "", price: d.price || "Free",
+    approval: !!d.approval, capacity: d.capacity || 0,
+    visibility: d.visibility === "private" ? "private" : "public",
+    createdAt: stamp(d.createdAt),
+  };
+}
+
+export async function createV2Event(row) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error("Sign in required");
+  const id = doc(collection(db, V2)).id;
+  const event = {
+    ownerId: uid,
+    title: row.title || row.name || "",
+    cover: row.cover || row.art || "crowd",
+    startsAt: toTime(row.startsAt ?? row.starts_at),
+    endsAt: toTime(row.endsAt ?? row.ends_at),
+    timezone: row.timezone || "",
+    location: row.location || "",
+    description: row.description || "",
+    price: row.price || "Free",
+    approval: !!row.approval,
+    capacity: Number(row.capacity) || 0,
+    visibility: row.visibility === "private" ? "private" : "public",
+    createdAt: serverTimestamp(),
+  };
+  const batch = writeBatch(db);
+  batch.set(doc(db, V2, id), event);
+  // Owner index: the only supported way for an owner to list their private events.
+  batch.set(doc(db, "gp_users", uid, CREATED, id), {
+    title: event.title, startsAt: event.startsAt, visibility: event.visibility,
+  });
+  await batch.commit();
+  return id;
+}
+
+export async function listV2Events() {
+  // The where() is mandatory: rules are not filters, so a bare collection
+  // query would be denied because private events fail the list rule.
+  const snap = await getDocs(query(
+    collection(db, V2), where("visibility", "==", "public"), orderBy("startsAt", "desc")));
+  return snap.docs.map(v2Event);
+}
+
+export async function getV2Event(id) {
+  const s = await getDoc(doc(db, V2, id));
+  return s.exists() ? v2Event(s) : null;
+}
+
+export async function updateV2Event(id, row) {
+  const patch = {};
+  for (const key of ["title", "cover", "timezone", "location", "description", "price", "visibility"]) {
+    if (row[key] !== undefined) patch[key] = row[key];
+  }
+  if (row.approval !== undefined) patch.approval = !!row.approval;
+  if (row.capacity !== undefined) patch.capacity = Number(row.capacity) || 0;
+  if (row.startsAt !== undefined || row.starts_at !== undefined) {
+    patch.startsAt = toTime(row.startsAt ?? row.starts_at);
+  }
+  if (row.endsAt !== undefined || row.ends_at !== undefined) {
+    patch.endsAt = toTime(row.endsAt ?? row.ends_at);
+  }
+  if (row.name !== undefined && patch.title === undefined) patch.title = row.name;
+  if (row.art !== undefined && patch.cover === undefined) patch.cover = row.art;
+  if (!Object.keys(patch).length) return;
+  // Event doc only — the owner index is intentionally left untouched.
+  await updateDoc(doc(db, V2, id), patch);
+}
+
+export async function deleteV2Event(id) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error("Sign in required");
+  // Best effort: the rules only let a user delete their OWN RSVP, so an owner
+  // cannot always cascade other attendees' entries. Once the event is gone the
+  // orphans are unreadable (the read rule's get() on the event fails).
+  try {
+    const rsvps = await getDocs(collection(db, RSVPS, id, RSVP_SUB));
+    for (let i = 0; i < rsvps.docs.length; i += 400) {
+      const batch = writeBatch(db);
+      rsvps.docs.slice(i, i + 400).forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+    }
+  } catch (e) {
+    if (e.code !== "permission-denied") throw e;
+  }
+  const batch = writeBatch(db);
+  batch.delete(doc(db, V2, id));
+  batch.delete(doc(db, "gp_users", uid, CREATED, id));
+  await batch.commit();
+}
+
+export async function rsvpEvent(eventId, user) {
+  const u = user || auth.currentUser;
+  const uid = u?.uid;
+  if (!uid) throw new Error("Sign in required");
+  await setDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid), {
+    uid, name: u.displayName || "", email: u.email || "",
+    at: serverTimestamp(),
+  });
+}
+
+export async function cancelRsvp(eventId, user) {
+  const uid = user?.uid || auth.currentUser?.uid;
+  if (!uid) throw new Error("Sign in required");
+  await deleteDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid));
+}
+
+export async function listRsvps(eventId) {
+  const snap = await getDocs(collection(db, RSVPS, eventId, RSVP_SUB));
+  return snap.docs.map((d) => {
+    const r = d.data();
+    return { uid: d.id, name: r.name || "", email: r.email || "", at: stamp(r.at) };
   });
 }
