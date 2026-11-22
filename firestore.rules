@@ -49,11 +49,21 @@ service cloud.firestore {
           (exists(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId))
             && get(/databases/$(database)/documents/gp_events/$(request.resource.data.eventId)).data.ownerId == request.auth.uid)
         );
-      allow delete: if isOwner(resource.data.eventId);
+      // Phase A: sub-event gates are keyed by a fest + sub-event, not gp_events.
+      // The sub-event doc is created in the same batch (so existsAfter/getAfter);
+      // isFestOwnerAfter also covers a fest created in that same batch.
+      allow create: if signedIn()
+        && request.resource.data.festId is string
+        && existsAfter(/databases/$(database)/documents/gp_fests/$(request.resource.data.festId)/events/$(request.resource.data.eventId))
+        && getAfter(/databases/$(database)/documents/gp_fests/$(request.resource.data.festId)/events/$(request.resource.data.eventId)).data.gateCode == code
+        && isFestOwnerAfter(request.resource.data.festId);
+      allow delete: if isOwner(resource.data.eventId)
+        || (resource.data.festId is string && isFestOwner(resource.data.festId));
       allow update: if isOwner(resource.data.eventId)
         || (resource.data.eventId == request.resource.data.eventId
             && request.resource.data.diff(resource.data).affectedKeys()
-                 .hasOnly(['checked', 'bounced', 'recent']));
+                 .hasOnly(['checked', 'bounced', 'recent']))
+        || (resource.data.festId is string && isFestOwner(resource.data.festId));
     }
 
     match /gp_gates/{code}/roster/{passId} {
@@ -121,6 +131,12 @@ service cloud.firestore {
     function isFestOwner(festId) {
       return signedIn() && get(/databases/$(database)/documents/gp_fests/$(festId)).data.ownerId == request.auth.uid;
     }
+    // Create-only variant: a fest may be created in the same batch as its first
+    // sub-event/gate, so the fest doc must be read from the after-state. Kept
+    // separate so read/update/delete still use the pre-write state.
+    function isFestOwnerAfter(festId) {
+      return signedIn() && getAfter(/databases/$(database)/documents/gp_fests/$(festId)).data.ownerId == request.auth.uid;
+    }
     function isSubEventOwner(festId, eventId) {
       return isFestOwner(festId)
         && exists(/databases/$(database)/documents/gp_fests/$(festId)/events/$(eventId));
@@ -135,7 +151,8 @@ service cloud.firestore {
       allow read, create, update, delete: if signedIn() && uid == request.auth.uid;
     }
     match /gp_fests/{festId}/events/{eventId} {
-      allow read, create, update, delete: if isFestOwner(festId);
+      allow read, update, delete: if isFestOwner(festId);
+      allow create: if isFestOwnerAfter(festId);
     }
     match /gp_reg_public/{eventId} {
       allow get: if signedIn();
