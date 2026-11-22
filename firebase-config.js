@@ -20,5 +20,5 @@ window.FIREBASE = {
   appId: "1:554053980634:web:081d4676b86b394a06b0e3",
   // OAuth client ID (Web application) for the organiser's Google Sheet access.
   // Google Cloud → APIs & Services → Credentials; authorised origin = your deployed domain.
-  googleOAuthClientId: "",
+  googleOAuthClientId: "646944374445-ecs2s80bs5kqlpm5heu8ksuglod2nrpr.apps.googleusercontent.com",
 };
