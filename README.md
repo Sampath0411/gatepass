@@ -15,6 +15,22 @@ Made by [sampath.exe](https://github.com/sampath0411).
 
 ---
 
+## The events homepage
+
+The homepage at `/` is now a Luma-inspired event browser. No account is needed to browse; sign in with Google to create or RSVP.
+
+- **Events** — the feed of public events, newest first. Each card shows a cover, date badge, location, ticket price and a "N going" count (with attendee initials).
+- **Calendars** — a month grid with dots and labels on days that have events. Click a day to filter the list below, or use the arrows to change month.
+- **Discover** — search across event names, places, descriptions and cover themes, plus category chips for a one-tap filter.
+- **Create Event** — pick one of six covers, then set the name, start/end date and time, timezone, location, description, ticket price, approval, capacity and visibility (public or private). The host sees **Edit event** and **Delete event** on their own event pages; editing reopens the same form with the details filled in.
+- **Event detail + RSVP** — open a card for the full description, date, venue and attendee count. Signed-in guests can **RSVP** or **Cancel RSVP**; private events stay visible only to their host.
+
+Events live in `gp_events_v2` and RSVPs in `gp_rsvps/{eventId}/rsvps/{uid}`. Firestore Security Rules make public events and their RSVPs readable by anyone, keep private events owner-only, and let only the signed-in attendee create or delete their own RSVP (RSVP updates are denied). Adding `?demo=1` to the homepage fills it with sample cards for UI preview — demo mode never writes to Firestore.
+
+**The legacy routes still work:** `/gate/` (the scanner), `/p/#<token>` (a pass) and `/register/#/register/<eventId>` (fest registration) are unchanged and keep their own riso-poster styling. The original organiser dashboard module is still in the repo; the root `/` now serves the events homepage instead.
+
+---
+
 ## How it works
 
 | Who | What they do | Account? |
@@ -99,7 +115,9 @@ Event details, each attendee's name and the one contact column you choose (email
 ## Files
 
 ```
-index.html              organiser app (sign-in, fests/sub-events, events, passes, gate code, live counter)
+index.html              events homepage (feed, calendar, discover, create, detail + RSVP)
+assets/js/events.js     events homepage routing and rendering
+assets/css/luma.css     charcoal/white homepage styling, scoped to body.luma
 p/index.html            the attendee's pass, at p/#<token>
 register/index.html     public Google-signed-in registration, at register/#/register/<eventId>
 gate/index.html         the gate scanner

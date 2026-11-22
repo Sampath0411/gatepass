@@ -420,3 +420,130 @@ test("38. the fest owner can read a sub-event; another user cannot", async () =>
   await assertFails(as(OTHER).doc(`gp_fests/${FEST}`).get());
   await assertFails(as(null).collection("gp_fests").get());
 });
+
+// ---- Luma-style events v2 + RSVPs (39-45) ----
+// The v2 event doc is the only authority for visibility/ownership. RSVP docs
+// live under gp_rsvps/{eventId}/rsvps/{uid}, where the doc id is the attendee's
+// uid; rules let each attendee create/delete only their own RSVP, and never
+// update one. These tests seed with rules disabled (emulator admin) so each
+// case starts from one consistent public + private event graph.
+const V2_PUBLIC = "v2-public", V2_PRIVATE = "v2-private";
+const V2_NEW = "v2-new", V2_NEW_OTHER = "v2-new-other";
+const RSVPER = "rsvper-uid", FRESH_RSVP = "fresh-rsvp-uid";
+
+const seedV2 = () => env.withSecurityRulesDisabled(async (ctx) => {
+  const db = ctx.firestore();
+  const startsAt = new Date();
+  const endsAt = new Date(startsAt.getTime() + 3600000);
+  const row = (title, visibility) => ({
+    ownerId: OWNER, title, visibility, cover: "crowd", startsAt, endsAt,
+    timezone: "GMT+05:30 · Kolkata", location: "Test Hall", description: "A test event",
+    price: "Free", approval: false, capacity: 0,
+  });
+  await db.doc(`gp_events_v2/${V2_PUBLIC}`).set(row("Public V2 Event", "public"));
+  await db.doc(`gp_events_v2/${V2_PRIVATE}`).set(row("Private V2 Event", "private"));
+  // Owner-scoped index used by the client for private/owner lists.
+  await db.doc(`gp_users/${OWNER}/createdEvents/${V2_PUBLIC}`).set({ title: "Public V2 Event", startsAt, visibility: "public" });
+  await db.doc(`gp_users/${OWNER}/createdEvents/${V2_PRIVATE}`).set({ title: "Private V2 Event", startsAt, visibility: "private" });
+  // Seeded RSVPs (one per event) give read/update/delete tests a live doc.
+  for (const eventId of [V2_PUBLIC, V2_PRIVATE]) {
+    for (const uid of [OTHER, RSVPER]) {
+      await db.doc(`gp_rsvps/${eventId}/rsvps/${uid}`).set({ uid, name: "Ada", email: "ada@x.com", at: startsAt });
+    }
+  }
+});
+const v2row = (ownerId) => ({
+  ownerId, title: "Another V2 Event", visibility: "public", cover: "crowd",
+  startsAt: new Date(), endsAt: new Date(Date.now() + 3600000), location: "Hall",
+});
+
+test("39. public v2 event: get is open to all; list needs the visibility filter; owner uses the index", async () => {
+  await seedV2();
+  await assertSucceeds(as(null).doc(`gp_events_v2/${V2_PUBLIC}`).get());
+  await assertSucceeds(as(OTHER).doc(`gp_events_v2/${V2_PUBLIC}`).get());
+  await assertSucceeds(as(OWNER).doc(`gp_events_v2/${V2_PUBLIC}`).get());
+  // Rules are not filters: a bare collection read hits the private doc and fails;
+  // the client's where("visibility","==","public") query succeeds.
+  await assertFails(as(null).collection("gp_events_v2").get());
+  const pub = await assertSucceeds(as(null).collection("gp_events_v2").where("visibility", "==", "public").get());
+  assert.equal(pub.size, 1);
+  assert.equal(pub.docs[0].id, V2_PUBLIC);
+  // Owner listing uses the owner-scoped index, not a query on gp_events_v2.
+  await assertSucceeds(as(OWNER).collection(`gp_users/${OWNER}/createdEvents`).get());
+  await assertFails(as(OTHER).collection(`gp_users/${OWNER}/createdEvents`).get());
+});
+
+test("40. private v2 event is hidden from non-owners, including its RSVPs", async () => {
+  await seedV2();
+  await assertFails(as(null).doc(`gp_events_v2/${V2_PRIVATE}`).get());
+  await assertFails(as(OTHER).doc(`gp_events_v2/${V2_PRIVATE}`).get());
+  await assertSucceeds(as(OWNER).doc(`gp_events_v2/${V2_PRIVATE}`).get());
+  // RSVP reads follow the event's visibility: public is open, private is owner-only.
+  await assertSucceeds(as(null).collection(`gp_rsvps/${V2_PUBLIC}/rsvps`).get());
+  await assertSucceeds(as(null).doc(`gp_rsvps/${V2_PUBLIC}/rsvps/${OTHER}`).get());
+  await assertFails(as(null).collection(`gp_rsvps/${V2_PRIVATE}/rsvps`).get());
+  await assertFails(as(OTHER).collection(`gp_rsvps/${V2_PRIVATE}/rsvps`).get());
+  await assertFails(as(OTHER).doc(`gp_rsvps/${V2_PRIVATE}/rsvps/${OTHER}`).get());
+  await assertSucceeds(as(OWNER).collection(`gp_rsvps/${V2_PRIVATE}/rsvps`).get());
+  await assertSucceeds(as(OWNER).doc(`gp_rsvps/${V2_PRIVATE}/rsvps/${OTHER}`).get());
+});
+
+test("41. v2 event create needs a matching ownerId; update/delete are owner-only", async () => {
+  await seedV2();
+  await assertSucceeds(as(OWNER).doc(`gp_events_v2/${V2_NEW}`).set(v2row(OWNER)));
+  await assertSucceeds(as(OTHER).doc(`gp_events_v2/${V2_NEW_OTHER}`).set(v2row(OTHER)));
+  await assertFails(as(OTHER).doc(`gp_events_v2/v2-forged`).set(v2row(OWNER)));
+  await assertFails(as(null).doc(`gp_events_v2/v2-anon`).set(v2row(OWNER)));
+  await assertSucceeds(as(OWNER).doc(`gp_events_v2/${V2_PUBLIC}`).update({ title: "Renamed by owner" }));
+  await assertFails(as(OTHER).doc(`gp_events_v2/${V2_PUBLIC}`).update({ title: "Hacked" }));
+  await assertFails(as(null).doc(`gp_events_v2/${V2_PUBLIC}`).update({ title: "Hacked" }));
+  await assertFails(as(OTHER).doc(`gp_events_v2/${V2_PUBLIC}`).delete());
+  await assertFails(as(null).doc(`gp_events_v2/${V2_PUBLIC}`).delete());
+  await assertSucceeds(as(OWNER).doc(`gp_events_v2/${V2_PUBLIC}`).delete());
+});
+
+test("42. an attendee can create only their own RSVP", async () => {
+  await seedV2();
+  // FRESH_RSVP has no seeded doc, so these are genuine creates.
+  await assertSucceeds(as(FRESH_RSVP).doc(`gp_rsvps/${V2_PUBLIC}/rsvps/${FRESH_RSVP}`).set({
+    uid: FRESH_RSVP, name: "Lin", email: "lin@x.com", at: new Date(),
+  }));
+  await assertFails(as(RSVPER).doc(`gp_rsvps/${V2_PUBLIC}/rsvps/${FRESH_RSVP}`).set({
+    uid: FRESH_RSVP, name: "Impostor", email: "x@x.com", at: new Date(),
+  }));
+  await assertFails(as(null).doc(`gp_rsvps/${V2_PUBLIC}/rsvps/anon`).set({
+    uid: "anon", name: "Anon", email: "a@x.com", at: new Date(),
+  }));
+});
+
+test("43. RSVP update is denied even to the attendee and the event owner", async () => {
+  await seedV2();
+  await assertFails(as(OTHER).doc(`gp_rsvps/${V2_PUBLIC}/rsvps/${OTHER}`).update({ name: "Renamed" }));
+  await assertFails(as(RSVPER).doc(`gp_rsvps/${V2_PUBLIC}/rsvps/${RSVPER}`).update({ name: "Renamed" }));
+  await assertFails(as(OWNER).doc(`gp_rsvps/${V2_PUBLIC}/rsvps/${OTHER}`).update({ name: "Renamed" }));
+  await assertFails(as(null).doc(`gp_rsvps/${V2_PUBLIC}/rsvps/${OTHER}`).update({ name: "Renamed" }));
+});
+
+test("44. RSVP delete is own-only; owner cannot delete an attendee's RSVP", async () => {
+  await seedV2();
+  const rsvp = (uid) => `gp_rsvps/${V2_PUBLIC}/rsvps/${uid}`;
+  await assertFails(as(OTHER).doc(rsvp(RSVPER)).delete());
+  await assertFails(as(OWNER).doc(rsvp(RSVPER)).delete());   // event owner is not the RSVP owner
+  await assertFails(as(null).doc(rsvp(RSVPER)).delete());
+  await assertSucceeds(as(RSVPER).doc(rsvp(RSVPER)).delete());
+  await assertSucceeds(as(OTHER).doc(rsvp(OTHER)).delete());
+  await assertFails(as(OWNER).doc(rsvp(OTHER)).delete());
+});
+
+test("45. an owner-scoped index write is allowed only under the caller's own uid", async () => {
+  await seedV2();
+  await assertSucceeds(as(OWNER).doc(`gp_users/${OWNER}/createdEvents/v2-index-new`).set({
+    title: "Indexed", startsAt: new Date(), visibility: "private",
+  }));
+  await assertFails(as(OTHER).doc(`gp_users/${OWNER}/createdEvents/v2-index-forged`).set({
+    title: "Forged", startsAt: new Date(), visibility: "private",
+  }));
+  await assertFails(as(null).doc(`gp_users/${OWNER}/createdEvents/v2-index-anon`).set({
+    title: "Anon", startsAt: new Date(), visibility: "private",
+  }));
+});
