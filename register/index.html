@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Register · GatePass</title>
+<meta name="description" content="Sign in with Google, register for a GatePass event, and get your entry pass instantly.">
+<meta name="theme-color" content="#12121C">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" href="../assets/img/icon.svg" type="image/svg+xml">
+<link rel="preload" href="../assets/fonts/oswald-latin-wght.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="../assets/css/gatepass.css">
+<script type="importmap">
+{"imports":{
+  "firebase/app":"https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js",
+  "firebase/auth":"https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js",
+  "firebase/firestore":"https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js"
+}}
+</script>
+<script defer src="../firebase-config.js"></script>
+<script type="module" src="../assets/js/register.js"></script>
+</head>
+<body>
+<!--
+THESIS: A one-screen door. The event poster, one short form, one blue button — and the pass is in their hands the moment they tap it.
+OWN-WORLD: The existing GatePass riso palette only (warm paper #12121C, fluoro pink #FF4FB8, deep blue #AFC0FF, Oswald print voice). No new visual language, no new CSS.
+STORY: A student opens the link the organiser shared, signs in with Google, types their name, and lands straight on their QR pass.
+-->
+<main class="app">
+  <header class="mast">
+    <a class="logo ink" href="../">GatePass</a>
+    <span class="mast-role quiet">Register</span>
+  </header>
+  <div id="view" aria-live="polite">
+    <div class="skeleton" style="height:420px"></div>
+  </div>
+  <div class="scallops inked" aria-hidden="true"></div>
+</main>
+</body>
+</html>
