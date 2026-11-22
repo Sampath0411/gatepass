@@ -595,6 +595,22 @@ export async function registerStudentWithCode(desc, user, fields, code) {
   // be allowed to write a roster entry under a code that belongs to another event.
   const def = await getDoc(doc(db, "gp_reg_public", desc.event_id));
   if (!def.exists() || def.data().gateCode !== code) throw new Error("Invalid registration code");
+  // Best-effort duplicate guard. The rules currently allow only the fest owner to
+  // list registrations, so a student's query can be denied — in that case skip the
+  // check and let the rules' own guard be the authority rather than blocking a
+  // legitimate registration.
+  try {
+    const dup = await getDocs(query(
+      collection(db, "gp_fests", desc.fest_id, "registrations"),
+      where("uid", "==", user.uid), where("eventId", "==", desc.event_id), limit(1)));
+    if (!dup.empty) {
+      const e = new Error("You are already registered for this event");
+      e.code = "already-registered";
+      throw e;
+    }
+  } catch (e) {
+    if (e.code === "already-registered") throw e;
+  }
   const eventPath = ["gp_fests", desc.fest_id, "events", desc.event_id];
   const passId = doc(collection(db, ...eventPath, "passes")).id;
   const token = newToken();
@@ -613,6 +629,20 @@ export async function registerStudentWithCode(desc, user, fields, code) {
     checkedInAt: null, gate: "" });
   await batch.commit();
   return { token, passId, registrationId: regRef.id };
+}
+// Owner-side totals: students cannot update the sub-event or descriptor docs, so
+// the organiser dashboard calls this after registrations change. Counting the
+// registration docs keeps the display and the capacity check accurate even if a
+// write is interrupted.
+export async function syncEventTotals(festId, eventId) {
+  const snap = await getDocs(query(
+    collection(db, "gp_fests", festId, "registrations"), where("eventId", "==", eventId)));
+  const total = snap.size;
+  const batch = writeBatch(db);
+  batch.update(doc(db, "gp_fests", festId, "events", eventId), { total });
+  batch.update(doc(db, "gp_reg_public", eventId), { total });
+  await batch.commit();
+  return total;
 }
 export async function listRegistrations(festId) {
   const snap = await getDocs(collection(db, "gp_fests", festId, "registrations"));
