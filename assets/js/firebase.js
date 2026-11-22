@@ -897,6 +897,24 @@ export async function requestPass(eventId) {
   return { status: r.status || "approved", passToken: r.passToken || null };
 }
 
+// Host-only read of one member's pass. The owner's member list deliberately
+// never carries passToken, so the host fetches it on demand for the pass modal.
+// We verify ownership before reading so a code-holder cannot use this to pull
+// another member's token; the rules already limit this RSVP read to the owner
+// or the member themselves, so no rules change is needed.
+export async function getMemberPass(eventId, uid) {
+  const by = auth.currentUser?.uid;
+  if (!by) throw new Error("Sign in required");
+  const ev = await getDoc(doc(db, V2, eventId));
+  if (!ev.exists()) return null;
+  if (ev.data().ownerId !== by) throw new Error("Only the host can view member passes");
+  if (!uid) throw new Error("Missing member");
+  const s = await getDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid));
+  if (!s.exists()) return null;
+  const r = s.data();
+  return { passToken: r.passToken || null, name: r.name || "", status: r.status || "approved" };
+}
+
 export async function updateRsvp(eventId, uid, answers = {}) {
   await updateDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid), {
     name: answers.name ?? "",

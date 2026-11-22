@@ -2,7 +2,7 @@
 import * as fb from "./firebase.js";
 import {
   ART, I, artUrl, esc, fmtWhen, fmtTime, passUrl, gateUrl, fmtCode, copyText,
-  configured as coreConfigured, toast, download, DB_MSG,
+  configured as coreConfigured, toast, download, DB_MSG, qrSvg,
 } from "./core.js";
 import { toCsv } from "./csv.js";
 
@@ -674,8 +674,14 @@ function passStatusHTML(pass) {
     return `<div class="l-status-banner is-rejected">${IX.close}<span>Request wasn't approved — update and resubmit</span></div>`;
   }
   if (pass.passToken) {
-    return `<a class="l-pass-link" href="${esc(passUrl(pass.passToken))}" target="_blank" rel="noopener">
-      ${IX.pass}<span>Open my pass</span>${IX.arrow}</a>`;
+    const url = passUrl(pass.passToken);
+    return `<a class="l-pass-link" href="${esc(url)}" target="_blank" rel="noopener">
+      ${IX.pass}<span>Open my pass</span>${IX.arrow}</a>
+    <div class="l-qr-card">
+      <div class="l-qr-frame">${qrSvg(url, { fg: "#12121C", margin: 2 })}</div>
+      <p>Show this QR at the gate</p>
+      <a class="l-qr-open" href="${esc(url)}" target="_blank" rel="noopener">Open full pass</a>
+    </div>`;
   }
   return `<div class="l-status-banner is-approved">${I.check}<span>You're approved</span></div>`;
 }
@@ -947,6 +953,56 @@ async function openRsvpFor(id) {
   openRsvpForm(ev, rsvps.find((r) => r.uid === u.uid) || null);
 }
 
+// Host-only pass modal. The member list never carries passToken, so fetch it
+// on demand through the ownership-checked firebase helper before rendering.
+async function openMemberPass(uid) {
+  const ev = state.currentEvent;
+  if (!ev || !uid) return;
+  let pass;
+  try {
+    pass = await fb.getMemberPass(ev.id, uid);
+  } catch (e) {
+    toast(e?.message || DB_MSG, "warnDot");
+    return;
+  }
+  if (!pass || !pass.passToken) {
+    toast("This member doesn't have a pass yet", "warnDot");
+    return;
+  }
+  const member = (state.members || []).find((r) => r.uid === uid);
+  closeRsvpForm();
+  const url = passUrl(pass.passToken);
+  const overlay = document.createElement("div");
+  overlay.className = "l-modal-overlay";
+  overlay.innerHTML = `
+    <div class="l-modal l-pass-modal" role="dialog" aria-modal="true" aria-labelledby="l-pass-title">
+      <div class="l-modal-head">
+        <div>
+          <div class="l-eyebrow">Member pass</div>
+          <h2 class="l-modal-title" id="l-pass-title">${esc(pass.name || member?.name || "Member")}</h2>
+          <p class="l-modal-sub">Show this QR at the gate.</p>
+        </div>
+        <button type="button" class="l-modal-close" data-close-modal aria-label="Close">${IX.close}</button>
+      </div>
+      <div class="l-modal-body l-pass-modal-body">
+        <div class="l-qr-card">
+          <div class="l-qr-frame">${qrSvg(url, { fg: "#12121C", margin: 2 })}</div>
+          <p>Show this QR at the gate</p>
+        </div>
+      </div>
+      <div class="l-actions l-modal-actions">
+        <a class="l-primary l-block" href="${esc(url)}" target="_blank" rel="noopener">Open full pass</a>
+      </div>
+    </div>`;
+  document.body.append(overlay);
+  const onKey = (e) => { if (e.key === "Escape") closeRsvpForm(); };
+  modalCleanup = () => { document.removeEventListener("keydown", onKey); overlay.remove(); };
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay || e.target.closest("[data-close-modal]")) closeRsvpForm();
+  });
+  document.addEventListener("keydown", onKey);
+}
+
 // ── organiser member directory ──────────────────────────────────────────────
 function filteredMembers() {
   const q = String(state.memberQuery || "").trim().toLowerCase();
@@ -961,12 +1017,16 @@ function memberRowsHTML(rows, fields) {
     return `<tr><td class="l-table-empty" colspan="${fields.length + 3}">No members to show.</td></tr>`;
   }
   return rows.map((r) => {
-    const pending = (r.status || "approved") === "pending";
+    const status = r.status || "approved";
+    const pending = status === "pending";
+    const approved = status === "approved";
     return `<tr>
     ${fields.map((f) => `<td>${esc(memberValue(r, f)) || "—"}</td>`).join("")}
     <td class="l-member-status">${statusPill(r.status)}</td>
     <td class="l-member-joined">${esc(joinedLabel(r))}</td>
     <td class="l-member-actions">
+      ${approved ? `<button type="button" class="l-mini-btn is-pass" data-action="member-pass" data-uid="${esc(r.uid)}"
+        title="View member pass">${IX.pass}<span>Pass</span></button>` : ""}
       ${pending ? `<button type="button" class="l-mini-btn is-approve" data-action="member-approve" data-uid="${esc(r.uid)}"
         title="Approve member">${I.check}<span>Approve</span></button>
       <button type="button" class="l-mini-btn is-reject" data-action="member-reject" data-uid="${esc(r.uid)}"
@@ -1178,6 +1238,7 @@ function onClick(e) {
   if (a === "cancel-rsvp") { doCancelRsvp(el.dataset.id); return; }
   if (a === "member-approve") { setMemberStatus(true, el.dataset.uid); return; }
   if (a === "member-reject") { setMemberStatus(false, el.dataset.uid); return; }
+  if (a === "member-pass") { openMemberPass(el.dataset.uid); return; }
   if (a === "members-csv") { exportMembersCsv(); return; }
   if (a === "member-edit") {
     const member = (state.members || []).find((r) => r.uid === el.dataset.uid);

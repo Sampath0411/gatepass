@@ -527,6 +527,25 @@ body.luma .l-rsvp-card .l-pass-link {
 body.luma .l-pass-link:hover { background: #F075AC; color: #1A1A1A; }
 body.luma .l-pass-link svg { width: 16px; height: 16px; }
 
+/* ── inline QR pass card (registered member's own pass) ─────── */
+body.luma .l-qr-card {
+  margin-top: 16px; padding: 16px; border-radius: 12px;
+  background: #252525; border: 1px solid #454545; text-align: center;
+}
+body.luma .l-qr-frame {
+  width: 180px; max-width: 100%; margin: 0 auto; padding: 12px;
+  background: #fff; border-radius: 10px;
+}
+body.luma .l-qr-frame svg { display: block; width: 100%; height: auto; }
+body.luma .l-qr-card p { margin: 12px 0 0; font-size: 12px; color: #BDBDBD; }
+body.luma .l-qr-open {
+  display: flex; align-items: center; justify-content: center;
+  height: 40px; margin-top: 12px; border-radius: 9px;
+  background: var(--l-accent); color: #1A1A1A;
+  font-size: 13px; font-weight: 700; transition: background .18s;
+}
+body.luma .l-qr-open:hover { background: #F075AC; color: #1A1A1A; }
+
 /* ── RSVP / member edit modal ───────────────────────────────── */
 body.luma .l-modal-overlay {
   position: fixed; inset: 0; z-index: 300;
@@ -564,6 +583,13 @@ body.luma .l-modal-error { margin: 4px 20px 0; }
 body.luma .l-modal-actions { flex: none; margin-top: 12px; padding: 14px 20px; }
 body.luma .l-modal-actions .l-primary { height: 40px; }
 body.luma .l-modal-actions .l-primary svg { width: 15px; height: 15px; }
+
+/* ── host's view of a member's pass ──────────────────────────── */
+body.luma .l-pass-modal { width: min(100%, 380px); }
+body.luma .l-pass-modal-body { display: grid; place-items: center; padding: 20px; overflow-y: auto; }
+body.luma .l-pass-modal .l-qr-card { width: 100%; margin: 0; }
+body.luma .l-pass-modal .l-qr-frame { width: 200px; }
+body.luma .l-pass-modal .l-modal-actions { margin-top: 0; }
 
 /* ── organiser member directory ─────────────────────────────── */
 body.luma .l-members { margin-top: 46px; padding-top: 26px; border-top: 1px solid #363636; }
