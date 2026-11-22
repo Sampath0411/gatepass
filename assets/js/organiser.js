@@ -4,6 +4,7 @@ import {
   copyText, toast, download, qrSvg, I, paintIcons, DB_MSG, escT, typo, store,
 } from "./core.js";
 import * as fb from "./firebase.js";
+import * as sheets from "./sheets.js";
 import { parseTable, analyse, toPasses, toCsv, isEmail, isPhone, normalizePhone, sheetToCsvUrl, fetchSheetCsv } from "./csv.js";
 import { passImageBlob, shareOrDownload, copyImageToClipboard, gmailCompose } from "./pass-image.js";
 
@@ -11,6 +12,8 @@ const view = document.getElementById("view");
 const roleEl = document.getElementById("role");
 let session = null;
 let live = null;
+let regUnsub = null;          // fest registrations snapshot (Sheet sync + table)
+let activeFest = null;        // fest view state, so teardown can stop stale syncs
 
 const MAX_ROWS = 5000;
 
@@ -68,7 +71,10 @@ function route() {
   roleEl.querySelector("#signout").addEventListener("click", async () => { await fb.signOutUser(); location.hash = ""; });
   // Firestore auto-IDs are 20-character alphanumeric strings, not UUIDs.
   const m = h.match(/^#\/e\/([A-Za-z0-9_-]+)(\/edit)?$/);
+  const fm = h.match(/^#\/fest\/([A-Za-z0-9_-]+)$/);
   if (h === "#/new") return eventForm();
+  if (h === "#/fests") return festListView();
+  if (fm) return festView(fm[1]);
   if (m) return m[2] ? eventForm(m[1]) : eventView(m[1]);
   return listView();
 }
@@ -146,7 +152,7 @@ async function listView() {
   }).join("");
   view.innerHTML = `
     <section class="stack narrow">
-      <div class="head-row"><h1 class="head">Your events</h1></div>
+      <div class="head-row"><h1 class="head">Your events</h1><a class="btn small" href="#/fests">Fests ${I.arrow}</a></div>
       ${data.length ? stubs : `
         <div class="empty">
           <h3>No events yet</h3>
@@ -227,6 +233,333 @@ async function eventForm(id = null) {
     btn.disabled = false;
     location.hash = `#/e/${data.id}`;
   });
+}
+
+// ─────────────────────────────────────────────── fests (Phase A)
+
+const csvSlug = (name) => String(name || "fest").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "fest";
+
+async function festListView() {
+  document.title = "Your fests · GatePass";
+  view.innerHTML = `<div class="skeleton" style="height:220px"></div>`;
+  const here = route.last;
+  let fests;
+  try { fests = await withTimeout(fb.listFests(session.uid)); }
+  catch (e) { return fail(e); }
+  if (here !== route.last) return;
+  const stubs = fests.map((f) => `
+    <a class="stub" href="#/fest/${encodeURIComponent(f.id)}">
+      <span class="stub-art" style="background-image:url('${artUrl(0, true)}')"></span>
+      <span class="stub-body">
+        <span class="stub-name ink">${escT(f.name)}</span>
+        <span class="stub-meta">${esc(fmtWhen(f.starts_at))}</span>
+      </span>
+      <span class="stub-count">Open<small>sub-events &amp; registrations</small></span>
+    </a>`).join("");
+  view.innerHTML = `
+    <section class="stack narrow">
+      <div class="head-row"><h1 class="head">Your fests</h1><button class="btn small" type="button" id="newFest">${I.plus}New fest</button></div>
+      ${fests.length ? stubs : `
+        <div class="empty">
+          <h3>No fests yet</h3>
+          <p class="sub" style="color:var(--blue)">A fest groups sub-events, their gate codes and one registrations sheet.</p>
+        </div>`}
+      <p class="fine" style="margin:0">Need a single event with a sheet you upload yourself? <a href="#/new">Make a regular event instead.</a></p>
+    </section>`;
+  view.querySelector("#newFest").addEventListener("click", festForm);
+}
+
+function festForm() {
+  document.title = "New fest · GatePass";
+  const when = nextSaturday();
+  view.innerHTML = `
+    <div class="narrow">
+      <a class="backlink" href="#/fests">${I.back}Your fests</a>
+      <form id="festForm" class="stack" novalidate>
+        <h1 class="head">New fest</h1>
+        <label class="field"><span>Fest name</span><input class="input" name="name" maxlength="80" required placeholder="e.g. Spring Fest 2026"></label>
+        <label class="field"><span>Club</span><input class="input" name="club" maxlength="80" placeholder="e.g. Student Council"></label>
+        <label class="field"><span>Venue</span><input class="input" name="venue" maxlength="120" placeholder="e.g. Main Ground"></label>
+        <label class="field"><span>Date</span><input class="input" type="date" name="date" required value="${ymd(when)}"></label>
+        <p class="err" id="fErr" role="alert" hidden></p>
+        <button class="btn-primary compact" type="submit" id="saveFest"><span class="label">Create fest</span><span class="arrow">${I.arrow}</span></button>
+      </form>
+    </div>`;
+  const form = view.querySelector("#festForm"), err = view.querySelector("#fErr");
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(form);
+    const name = String(f.get("name")).trim();
+    const starts = new Date(`${f.get("date")}T18:00`);
+    if (!name) { err.textContent = "Give the fest a name."; err.hidden = false; return form.elements.name.focus(); }
+    if (isNaN(starts)) { err.textContent = "Pick a date for the fest."; err.hidden = false; return; }
+    const btn = view.querySelector("#saveFest"); btn.disabled = true;
+    try {
+      const id = await withTimeout(fb.createFest({
+        name, club: String(f.get("club")).trim(), venue: String(f.get("venue")).trim(),
+        art: 0, starts_at: starts.toISOString(),
+      }));
+      location.hash = `#/fest/${id}`;
+    } catch (e2) {
+      btn.disabled = false;
+      err.textContent = e2.message;
+      err.hidden = false;
+    }
+  };
+}
+
+async function festView(id) {
+  view.innerHTML = `<div class="skeleton" style="height:520px"></div>`;
+  const here = route.last;
+  let fest, events;
+  try {
+    fest = await withTimeout(fb.getFest(id));
+    if (!fest) { toast("That fest isn't yours or was deleted", "x"); location.hash = "#/fests"; return; }
+    events = await withTimeout(fb.listSubEvents(id));
+  } catch (e) { return fail(e); }
+  if (here !== route.last) return;
+
+  const state = { fest, events, regs: [], syncing: false, syncError: "", alive: true };
+  activeFest = state;
+  document.title = `${typo(fest.name)} · GatePass`;
+  view.innerHTML = `
+    <a class="backlink" href="#/fests">${I.back}Your fests</a>
+    <div class="stack">
+      <div class="poster" id="festPoster">
+        <h1 class="poster-title ink">${escT(fest.name)}</h1>
+        ${fest.club ? `<p class="poster-club">${esc(fest.club)}</p>` : ""}
+        <span class="poster-when">${esc(fmtWhen(fest.starts_at))}${fest.venue ? ` · ${esc(fest.venue)}` : ""}</span>
+      </div>
+      <section class="stack" id="festSheetBox"></section>
+      <section class="stack" id="festEventsBox"></section>
+      <section class="stack" id="festRegsBox"></section>
+    </div>`;
+  view.querySelector("#festPoster").style.backgroundImage = `url("${artUrl(fest.art)}")`;
+  renderFestSheet(state);
+  renderFestEvents(state);
+  renderFestRegs(state);
+  regUnsub = fb.watchRegistrations(fest.id, (rows) => {
+    if (!state.alive) return;
+    state.regs = rows;
+    renderFestRegs(state);
+    syncFestSheet(state);
+  });
+}
+
+function renderFestSheet(state) {
+  const box = view.querySelector("#festSheetBox");
+  if (!box) return;
+  const f = state.fest;
+  const connected = sheets.hasSheetToken();
+  box.innerHTML = `
+    <div class="head-row"><h2 class="head">Google Sheet</h2><span class="fine">${connected ? "Connected" : "Not connected"}</span></div>
+    <p class="fine" style="margin:0">New registrations append here live while this dashboard stays open.</p>
+    <label class="field"><span>Sheet URL (or ID)</span><input class="input" id="festSheetUrl" type="url" inputmode="url" placeholder="https://docs.google.com/spreadsheets/d/…/edit" value="${esc(f.sheetId)}"></label>
+    <label class="field"><span>Tab / range</span><input class="input" id="festSheetRange" maxlength="120" placeholder="Registrations" value="${esc(f.sheetRange)}"></label>
+    <div class="tools">
+      <button class="btn small" type="button" id="saveSheet">Save</button>
+      <button class="btn small" type="button" id="connectSheet">${I.link}${connected ? "Reconnect" : "Connect Google Sheet"}</button>
+    </div>
+    <p class="err" id="sheetErr" role="alert" hidden></p>
+    <p class="fine" id="syncMsg" style="margin:0"></p>`;
+  const err = box.querySelector("#sheetErr");
+  box.querySelector("#saveSheet").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    f.sheetId = box.querySelector("#festSheetUrl").value.trim();
+    f.sheetRange = box.querySelector("#festSheetRange").value.trim() || "Registrations";
+    btn.disabled = true; err.hidden = true;
+    try {
+      await withTimeout(fb.setFestSheet(f.id, f.sheetId, f.sheetRange));
+      renderSyncMsg(state);
+      syncFestSheet(state);
+      toast("Sheet settings saved");
+    } catch (e2) {
+      err.textContent = e2.message; err.hidden = false;
+    } finally { btn.disabled = false; }
+  });
+  box.querySelector("#connectSheet").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true; err.hidden = true;
+    try {
+      await sheets.connectSheet(window.FIREBASE?.googleOAuthClientId || "");
+      renderFestSheet(state);
+      renderSyncMsg(state);
+      syncFestSheet(state);
+      toast("Google Sheet connected");
+    } catch (e2) {
+      err.textContent = e2.message; err.hidden = false;
+    } finally { btn.disabled = false; }
+  });
+  renderSyncMsg(state);
+}
+
+function renderSyncMsg(state) {
+  const el = view.querySelector("#syncMsg");
+  if (!el) return;
+  if (state.syncError) {
+    el.innerHTML = `<span class="err">${esc(state.syncError)}</span> <button class="btn small" type="button" id="retrySync">${I.refresh}Retry sync</button>`;
+    el.querySelector("#retrySync").onclick = () => syncFestSheet(state);
+    return;
+  }
+  const pending = state.regs.filter((r) => !r.sheet_synced).length;
+  el.textContent = !state.fest.sheetId
+    ? "Add a Sheet URL above to append registrations automatically."
+    : !sheets.hasSheetToken()
+      ? "Connect your Google account above to start live Sheet sync."
+      : state.syncing ? "Syncing registrations to the Sheet…"
+      : pending ? `${plural(pending, "unsynced registration")} waiting — new rows sync as they arrive.`
+      : "Sheet is up to date while this dashboard stays open.";
+}
+
+// Append every unsynced registration to the fest's Google Sheet. The snapshot
+// callback drives this; `syncing` keeps concurrent snapshots from double-writing.
+async function syncFestSheet(state) {
+  if (state.syncing || !state.alive) return;
+  const f = state.fest;
+  if (!f.sheetId || !sheets.hasSheetToken()) { renderSyncMsg(state); return; }
+  const pending = state.regs.filter((r) => !r.sheet_synced);
+  if (!pending.length) { renderSyncMsg(state); return; }
+  const seen = new Set(pending.map((r) => r.id));
+  const sheetId = sheets.sheetIdFromUrl(f.sheetId);
+  if (!sheetId) {
+    state.syncError = "That Sheet URL has no spreadsheet ID. Save the full link from your browser's address bar.";
+    renderSyncMsg(state);
+    return;
+  }
+  state.syncing = true;
+  state.syncError = "";
+  renderSyncMsg(state);
+  try {
+    for (const r of pending) {
+      if (!state.alive) return;
+      await withTimeout(sheets.appendRows(sheetId, f.sheetRange, [[
+        r.created_at || "", f.name, r.eventName || "", r.name || "", r.email || "", r.phone || "", passUrl(r.token),
+      ]]), 30000);
+      await withTimeout(fb.markSheetSynced(f.id, r.id), 30000);
+    }
+  } catch (e) {
+    state.syncError = `Sheet sync failed: ${e.message || e} Unsynced rows stay in the table — nothing is lost.`;
+  } finally {
+    state.syncing = false;
+    if (state.alive) {
+      renderSyncMsg(state);
+      // A registration that landed mid-sync was skipped by the guard above.
+      if (!state.syncError && state.regs.some((r) => !r.sheet_synced && !seen.has(r.id))) syncFestSheet(state);
+    }
+  }
+}
+
+function renderFestEvents(state) {
+  const box = view.querySelector("#festEventsBox");
+  if (!box) return;
+  const rows = state.events.slice()
+    .sort((a, b) => String(a.starts_at || "").localeCompare(String(b.starts_at || "")))
+    .map((e) => {
+      const link = `register/#/register/${encodeURIComponent(e.id)}`;
+      return `
+    <li>
+      <p class="pl-name">${escT(e.name)}</p>
+      <p class="pl-meta">${esc(fmtWhen(e.starts_at))}${e.venue ? ` · ${esc(e.venue)}` : ""} · Gate code <b>${esc(fmtCode(e.gate_code))}</b> · ${e.registration_open ? "open" : "closed"} · ${plural(e.total || 0, "pass")}</p>
+      <div class="pl-actions">
+        <a class="btn small" href="${esc(link)}" target="_blank" rel="noopener" title="Share this link with students">${I.open}Register link</a>
+        <button class="btn small" type="button" data-open="${esc(e.id)}" data-next="${e.registration_open ? "false" : "true"}">${e.registration_open ? "Close registration" : "Open registration"}</button>
+      </div>
+    </li>`;
+    }).join("");
+  box.innerHTML = `
+    <div class="head-row"><h2 class="head">Sub-events</h2><button class="btn small" type="button" id="addSub">${I.plus}Add sub-event</button></div>
+    ${rows ? `<ul class="passlist">${rows}</ul>` : `
+      <div class="empty"><h3>No sub-events yet</h3><p class="sub" style="color:var(--blue)">Add one to get a gate code and a public registration link.</p></div>`}
+    <form id="subForm" class="stack" hidden novalidate>
+      <label class="field"><span>Sub-event name</span><input class="input" name="name" maxlength="80" required placeholder="e.g. Day 1 · Main stage"></label>
+      <div class="two">
+        <label class="field"><span>Club</span><input class="input" name="club" maxlength="80"></label>
+        <label class="field"><span>Venue</span><input class="input" name="venue" maxlength="120"></label>
+      </div>
+      <div class="two">
+        <label class="field"><span>Date</span><input class="input" type="date" name="date" required value="${ymd(nextSaturday())}"></label>
+        <label class="field"><span>Time</span><input class="input" type="time" name="time" value="18:00"></label>
+      </div>
+      <label class="field"><span>Capacity (0 = no limit)</span><input class="input" type="number" name="capacity" min="0" max="100000" value="0"></label>
+      <p class="err" id="subErr" role="alert" hidden></p>
+      <button class="btn-primary compact" type="submit" id="saveSub"><span class="label">Add sub-event</span><span class="arrow">${I.arrow}</span></button>
+    </form>`;
+  const form = box.querySelector("#subForm"), subErr = box.querySelector("#subErr");
+  box.querySelector("#addSub").onclick = () => {
+    form.hidden = !form.hidden;
+    if (!form.hidden) form.elements.name.focus();
+  };
+  box.onclick = async (e) => {
+    const toggle = e.target.closest("[data-open]");
+    if (!toggle) return;
+    const subId = toggle.dataset.open, open = toggle.dataset.next === "true";
+    toggle.disabled = true;
+    try {
+      await withTimeout(fb.setRegistrationOpen(state.fest.id, subId, open));
+      const sub = state.events.find((x) => x.id === subId);
+      if (sub) sub.registration_open = open;
+      renderFestEvents(state);
+      toast(open ? "Registration opened" : "Registration closed");
+    } catch (err) {
+      toggle.disabled = false;
+      toast(err.message || "Couldn't change registration", "x");
+    }
+  };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(form);
+    const name = String(f.get("name")).trim();
+    const starts = new Date(`${f.get("date")}T${f.get("time") || "18:00"}`);
+    if (!name) { subErr.textContent = "Give the sub-event a name."; subErr.hidden = false; return; }
+    if (isNaN(starts)) { subErr.textContent = "Pick a valid date and time."; subErr.hidden = false; return; }
+    const btn = box.querySelector("#saveSub"); btn.disabled = true; subErr.hidden = true;
+    try {
+      const made = await withTimeout(fb.createSubEvent(state.fest.id, {
+        name, club: String(f.get("club")).trim(), venue: String(f.get("venue")).trim(),
+        art: 0, starts_at: starts.toISOString(), capacity: Number(f.get("capacity")) || 0,
+        registration_open: true,
+      }));
+      state.events = await withTimeout(fb.listSubEvents(state.fest.id));
+      renderFestEvents(state);
+      toast(`Sub-event added · gate code ${fmtCode(made.code)}`);
+    } catch (err) {
+      btn.disabled = false;
+      subErr.textContent = err.message || "Couldn't add the sub-event";
+      subErr.hidden = false;
+    }
+  };
+}
+
+function renderFestRegs(state) {
+  const box = view.querySelector("#festRegsBox");
+  if (!box) return;
+  const rows = state.regs.slice()
+    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  const body = rows.map((r) => `
+    <tr>
+      <td>${esc(fmtWhen(r.created_at))}</td>
+      <td>${escT(r.eventName)}</td>
+      <td>${esc(r.name)}</td>
+      <td>${esc(r.email || "—")}</td>
+      <td>${esc(r.phone || "—")}</td>
+      <td><a href="${esc(passUrl(r.token))}" target="_blank" rel="noopener">Open pass</a></td>
+      <td>${r.sheet_synced ? "Synced" : "Pending"}</td>
+    </tr>`).join("");
+  box.innerHTML = `
+    <div class="head-row"><h2 class="head">All registrations</h2><span class="fine">${plural(rows.length, "registration")}</span></div>
+    <div class="tools"><button class="btn small" type="button" id="regsCsv">${I.download}Export CSV</button></div>
+    ${rows.length ? `
+      <table class="preview-table">
+        <thead><tr><th>Time</th><th>Sub-event</th><th>Name</th><th>Email</th><th>Phone</th><th>Pass</th><th>Sheet</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>` : `<p class="fine" style="margin:0">No registrations yet. Share a sub-event's registration link to get started.</p>`}`;
+  box.querySelector("#regsCsv").onclick = () => {
+    const data = [["created_at", "sub_event", "name", "email", "phone", "pass_url", "sheet_status"]].concat(rows.map((r) => [
+      r.created_at || "", r.eventName || "", r.name || "", r.email || "", r.phone || "",
+      passUrl(r.token), r.sheet_synced ? "synced" : "pending",
+    ]));
+    download(`${csvSlug(state.fest.name)}-registrations.csv`, toCsv(data));
+  };
 }
 
 // ─────────────────────────────────────────────── one event
@@ -731,7 +1064,11 @@ function startLive(state) {
   live = () => { active = false; window.removeEventListener("gp-stats", onStats); fb.stopStats(); };
   fb.gateStats(state.ev.gate_code);
 }
-function stopLive() { if (live) { live(); live = null; } }
+function stopLive() {
+  if (live) { live(); live = null; }
+  if (regUnsub) { regUnsub(); regUnsub = null; }
+  if (activeFest) { activeFest.alive = false; activeFest = null; }
+}
 
 paintIcons();
 boot().catch(fail);
