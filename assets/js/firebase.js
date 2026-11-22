@@ -4,7 +4,7 @@ import {
   getRedirectResult, signOut, onAuthStateChanged,
 } from "firebase/auth";
 import {
-  getFirestore, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
+  getFirestore, doc, getDoc, getDocs, setDoc, addDoc, updateDoc,
   collection, query, where, orderBy, limit, writeBatch, runTransaction,
   serverTimestamp, increment, onSnapshot,
 } from "firebase/firestore";
@@ -623,7 +623,7 @@ export async function registerStudentWithCode(desc, user, fields, code) {
     passId, token, createdAt: serverTimestamp(), sheetSynced: false });
   batch.set(doc(db, "gp_passes", token), { id: passId, festId: desc.fest_id, eventId: desc.event_id,
     event: { name: desc.name, club: desc.club, starts_at: desc.starts_at, venue: desc.venue, art: desc.art },
-    name: fields.name, checkedInAt: null, gate: "" });
+    name: fields.name, checkedInAt: null, gate: "", registrationId: regRef.id });
   batch.set(doc(db, "gp_gates", code, "roster", passId), { name: fields.name,
     nameLower: fields.name.toLowerCase(), hint: mask(fields.contact || ""), token,
     checkedInAt: null, gate: "" });
@@ -700,11 +700,12 @@ function v2Event(s) {
 }
 
 // One gate code per v2 event, usable by the existing /gate/ scanner. Writes
-// the public pass, the gate roster row and the gate counter into the caller's
-// batch so issuing a pass is atomic with the RSVP state change. Returns the
-// token so the caller can store it on the RSVP (via rsvpRef) if supplied.
-function issuePassBatch(batch, event, uid, answers, rsvpRef) {
-  const token = newToken();
+// the public pass, its separate token doc, the public name projection, the
+// gate roster row and the gate counter into the caller's batch so issuing a
+// pass is atomic with the RSVP state change. The token is NEVER written to
+// the RSVP: an RSVP reader (owner or member) must not be able to read it.
+function issuePassBatch(batch, event, uid, answers, rsvpRef, passToken) {
+  const token = passToken;
   const name = answers.name || "";
   const contact = answers.email || answers.phone || "";
   // Never persist the gate code inside the publicly readable pass document.
@@ -724,6 +725,14 @@ function issuePassBatch(batch, event, uid, answers, rsvpRef) {
     id: uid, eventId: event.id, event: publicEvent,
     name, checkedInAt: null, gate: "",
   });
+  // The capability lives in its own collection, readable only by the member
+  // or the host. Firestore doc paths need an even number of segments, hence
+  // the `tokens` subcollection (same shape as gp_rsvps/{eventId}/rsvps/{uid}).
+  batch.set(doc(db, "gp_pass_tokens", event.id, "tokens", uid), {
+    passToken: token, updatedAt: serverTimestamp(),
+  });
+  // Name-only public projection: attendee lists no longer need to read RSVPs.
+  batch.set(doc(db, "gp_members_public", event.id, "m", uid), { name });
   if (event.gateCode) {
     batch.set(doc(db, GATES, event.gateCode, "roster", uid), {
       name, nameLower: name.toLowerCase(), hint: mask(contact), token,
@@ -731,8 +740,24 @@ function issuePassBatch(batch, event, uid, answers, rsvpRef) {
     });
     batch.update(doc(db, GATES, event.gateCode), { total: increment(1) });
   }
-  if (rsvpRef) batch.update(rsvpRef, { passId: uid, passToken: token });
+  if (rsvpRef) batch.update(rsvpRef, { passId: uid });
   return token;
+}
+
+// Revoke everything issued with a pass: public pass doc, token doc and gate
+// roster row. The caller adds the RSVP mutation to the same batch so a
+// rejection/cancellation cannot leave a usable pass behind.
+async function revokePassBatch(batch, eventId, uid) {
+  const tokenRef = doc(db, "gp_pass_tokens", eventId, "tokens", uid);
+  const tokenSnap = await getDoc(tokenRef);
+  if (tokenSnap.exists()) {
+    const token = tokenSnap.data().passToken;
+    if (token) batch.delete(doc(db, PASS_PUB, token));
+    batch.delete(tokenRef);
+  }
+  const ev = await getDoc(doc(db, V2, eventId));
+  const gateCode = ev.exists() ? ev.data().gateCode : null;
+  if (gateCode) batch.delete(doc(db, GATES, gateCode, "roster", uid));
 }
 
 export async function createV2Event(row) {
@@ -816,23 +841,45 @@ export async function updateV2Event(id, row) {
 export async function deleteV2Event(id) {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error("Sign in required");
-  // Best effort: the rules only let a user delete their OWN RSVP, so an owner
-  // cannot always cascade other attendees' entries. Once the event is gone the
-  // orphans are unreadable (the read rule's get() on the event fails).
-  try {
-    const rsvps = await getDocs(collection(db, RSVPS, id, RSVP_SUB));
-    for (let i = 0; i < rsvps.docs.length; i += 400) {
-      const batch = writeBatch(db);
-      rsvps.docs.slice(i, i + 400).forEach((d) => batch.delete(d.ref));
-      await batch.commit();
+  const ev = await getDoc(doc(db, V2, id));
+  const gateCode = ev.exists() ? ev.data().gateCode : null;
+  // The owner may read all RSVPs, but token docs are only readable by the
+  // member or the owner — so resolve each one by the RSVP's uid, never by
+  // listing the token collection.
+  const rsvps = await getDocs(collection(db, RSVPS, id, RSVP_SUB));
+  const cleanup = [];
+  for (const r of rsvps.docs) {
+    const tokenSnap = await getDoc(doc(db, "gp_pass_tokens", id, "tokens", r.id));
+    if (tokenSnap.exists()) {
+      const token = tokenSnap.data().passToken;
+      if (token) cleanup.push(doc(db, PASS_PUB, token));
+      cleanup.push(tokenSnap.ref);
     }
-  } catch (e) {
-    if (e.code !== "permission-denied") throw e;
   }
-  const batch = writeBatch(db);
-  batch.delete(doc(db, V2, id));
-  batch.delete(doc(db, "gp_users", uid, CREATED, id));
-  await batch.commit();
+  if (gateCode) {
+    const roster = await getDocs(collection(db, GATES, gateCode, "roster"));
+    cleanup.push(...roster.docs.map((d) => d.ref));
+    // The gate delete rule still looks up the event, so it must be in the
+    // cleanup phase — before the event doc is deleted.
+    cleanup.push(doc(db, GATES, gateCode));
+  }
+  for (let i = 0; i < cleanup.length; i += 400) {
+    const batch = writeBatch(db);
+    cleanup.slice(i, i + 400).forEach((r) => batch.delete(r));
+    await batch.commit();
+  }
+  // Event + index are last so every RSVP is removed while the event still
+  // exists (the RSVP delete rule checks the event via get()).
+  const finalRefs = [
+    ...rsvps.docs.map((d) => d.ref),
+    doc(db, V2, id),
+    doc(db, "gp_users", uid, CREATED, id),
+  ];
+  for (let i = 0; i < finalRefs.length; i += 400) {
+    const batch = writeBatch(db);
+    finalRefs.slice(i, i + 400).forEach((r) => batch.delete(r));
+    await batch.commit();
+  }
 }
 
 export async function rsvpEvent(eventId, user, answers = {}) {
@@ -844,6 +891,8 @@ export async function rsvpEvent(eventId, user, answers = {}) {
   // Approval events wait for the host; everything else issues the pass now.
   // A missing event doc is treated as non-approval for backwards compatibility.
   const approved = !event?.approval;
+  const token = newToken();
+  const status = approved ? "approved" : "pending";
   const rsvpRef = doc(db, RSVPS, eventId, RSVP_SUB, uid);
   const batch = writeBatch(db);
   batch.set(rsvpRef, {
@@ -852,13 +901,14 @@ export async function rsvpEvent(eventId, user, answers = {}) {
     phone: answers.phone ?? "",
     college: answers.college ?? "",
     answers,
-    status: approved ? "approved" : "pending",
+    status,
     at: serverTimestamp(),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
-  if (approved) issuePassBatch(batch, event || { id: eventId }, uid, answers, rsvpRef);
+  if (approved) issuePassBatch(batch, event || { id: eventId }, uid, answers, rsvpRef, token);
   await batch.commit();
+  return { status, passToken: approved ? token : null };
 }
 
 export async function approveMember(eventId, uid) {
@@ -869,32 +919,41 @@ export async function approveMember(eventId, uid) {
     getDoc(doc(db, V2, eventId)),
   ]);
   if (!rsvp.exists() || !event.exists()) throw new Error("RSVP or event not found");
+  const token = newToken();
   const rsvpRef = doc(db, RSVPS, eventId, RSVP_SUB, uid);
   const batch = writeBatch(db);
   batch.update(rsvpRef, {
     status: "approved", reviewedAt: serverTimestamp(), reviewedBy: by,
   });
-  issuePassBatch(batch, { id: eventId, ...event.data() }, uid, rsvp.data().answers || {}, rsvpRef);
+  issuePassBatch(batch, { id: eventId, ...event.data() }, uid, rsvp.data().answers || {}, rsvpRef, token);
   await batch.commit();
+  return { status: "approved", passToken: token };
 }
 
 export async function rejectMember(eventId, uid) {
   const by = auth.currentUser?.uid;
   if (!by) throw new Error("Sign in required");
-  await updateDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid), {
+  const batch = writeBatch(db);
+  await revokePassBatch(batch, eventId, uid);
+  batch.update(doc(db, RSVPS, eventId, RSVP_SUB, uid), {
     status: "rejected", reviewedAt: serverTimestamp(), reviewedBy: by,
   });
+  await batch.commit();
 }
 
-// The member's own RSVP is the single source of truth for their approval
-// state and pass token (never expose passToken in the owner's member list).
+// The member's own RSVP is the source of truth for approval state; the pass
+// token lives in its own doc, which only the member (or the host) may read.
 export async function requestPass(eventId) {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error("Sign in required");
   const s = await getDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid));
   if (!s.exists()) return { status: null, passToken: null };
   const r = s.data();
-  return { status: r.status || "approved", passToken: r.passToken || null };
+  const tok = await getDoc(doc(db, "gp_pass_tokens", eventId, "tokens", uid));
+  return {
+    status: r.status || "approved",
+    passToken: tok.exists() ? tok.data().passToken || null : null,
+  };
 }
 
 // Host-only read of one member's pass. The owner's member list deliberately
@@ -912,7 +971,11 @@ export async function getMemberPass(eventId, uid) {
   const s = await getDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid));
   if (!s.exists()) return null;
   const r = s.data();
-  return { passToken: r.passToken || null, name: r.name || "", status: r.status || "approved" };
+  const tok = await getDoc(doc(db, "gp_pass_tokens", eventId, "tokens", uid));
+  return {
+    passToken: tok.exists() ? tok.data().passToken || null : null,
+    name: r.name || "", status: r.status || "approved",
+  };
 }
 
 export async function updateRsvp(eventId, uid, answers = {}) {
@@ -927,7 +990,12 @@ export async function updateRsvp(eventId, uid, answers = {}) {
 }
 
 export async function deleteRsvp(eventId, uid) {
-  await deleteDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid));
+  // Revoke the issued pass in the same batch as the RSVP removal: a deleted
+  // RSVP must never leave a still-valid QR pass behind.
+  const batch = writeBatch(db);
+  await revokePassBatch(batch, eventId, uid);
+  batch.delete(doc(db, RSVPS, eventId, RSVP_SUB, uid));
+  await batch.commit();
 }
 
 export async function cancelRsvp(eventId, user) {
@@ -951,4 +1019,12 @@ export async function listRsvps(eventId) {
       updated_at: stamp(r.updatedAt),
     };
   });
+}
+
+// Public, name-only attendee projection. Non-owner member views use this
+// instead of listing RSVPs, which now expose contact details only to the
+// owner and to the member themselves.
+export async function listPublicMembers(eventId) {
+  const snap = await getDocs(collection(db, "gp_members_public", eventId, "m"));
+  return snap.docs.map((d) => ({ uid: d.id, name: d.data().name || "" }));
 }

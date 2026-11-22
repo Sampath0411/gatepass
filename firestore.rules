@@ -83,6 +83,7 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/gp_events_v2/$(resource.data.eventId)).data.gateCode == code
         && get(/databases/$(database)/documents/gp_events_v2/$(resource.data.eventId)).data.get('approval', false) == false
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['total'])
+        && request.resource.data.total == resource.data.total + 1
         && getAfter(/databases/$(database)/documents/gp_rsvps/$(resource.data.eventId)/rsvps/$(request.auth.uid)).data.status == 'approved';
     }
 
@@ -109,6 +110,10 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/gp_events_v2/$(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId)).data.get('approval', false) == false;
       allow delete: if isOwnerEventV2(
         get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
+      // A member revoking their own RSVP removes only their own roster row.
+      allow delete: if signedIn()
+        && passId == request.auth.uid
+        && get(/databases/$(database)/documents/gp_events_v2/$(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId)).data.gateCode == code;
       // Owner-only update. The scan transaction no longer writes the roster
       // stamp: checked-in state is derived from the one-shot claim doc instead.
       // A direct stamp write used to let anyone fake a check-in; it is closed.
@@ -119,15 +124,32 @@ service cloud.firestore {
     match /gp_passes/{token} {
       allow get: if true;
       allow list: if false;
+      // Legacy owner issuing a pass under gp_events/{eventId}.
       allow create: if isOwner(request.resource.data.eventId);
       // Phase A: a signed-in student creates their own public pass doc during
-      // registration. Firestore ORs the two create grants.
+      // registration. The matching registration doc is written in the SAME
+      // batch, so it must be read with getAfter() — get() would see the
+      // before-state and reject a legitimate registration.
       allow create: if signedIn()
-        && request.resource.data.keys().hasOnly(['id','festId','eventId','event','name','checkedInAt','gate']);
-      // V2 owner issuing a pass on approval. The signed-in grant above still
-      // covers a member issuing their own pass on a non-approval event.
+        && request.resource.data.festId is string
+        && request.resource.data.registrationId is string
+        && getAfter(/databases/$(database)/documents/gp_fests/$(request.resource.data.festId)/registrations/$(request.resource.data.registrationId)).data.uid == request.auth.uid
+        && getAfter(/databases/$(database)/documents/gp_fests/$(request.resource.data.festId)/registrations/$(request.resource.data.registrationId)).data.token == token
+        && getAfter(/databases/$(database)/documents/gp_fests/$(request.resource.data.festId)/registrations/$(request.resource.data.registrationId)).data.eventId == request.resource.data.eventId
+        && request.resource.data.keys().hasOnly(['id','festId','eventId','event','name','checkedInAt','gate','registrationId']);
+      // V2 owner issuing a pass on approval.
       allow create: if signedIn()
         && isOwnerEventV2(request.resource.data.eventId)
+        && request.resource.data.keys().hasOnly(['id','festId','eventId','event','name','checkedInAt','gate']);
+      // A member self-issues only on a non-approval event, and only in the
+      // batch that creates their approved RSVP AND the matching token doc.
+      // The token doc binds the public pass doc's ID to the capability, so a
+      // signed-in user cannot mint a public pass for somebody else.
+      allow create: if signedIn()
+        && request.resource.data.id == request.auth.uid
+        && get(/databases/$(database)/documents/gp_events_v2/$(request.resource.data.eventId)).data.get('approval', false) == false
+        && getAfter(/databases/$(database)/documents/gp_rsvps/$(request.resource.data.eventId)/rsvps/$(request.auth.uid)).data.status == 'approved'
+        && getAfter(/databases/$(database)/documents/gp_pass_tokens/$(request.resource.data.eventId)/tokens/$(request.auth.uid)).data.passToken == token
         && request.resource.data.keys().hasOnly(['id','festId','eventId','event','name','checkedInAt','gate']);
       // SECURITY (21 Nov 2026): owner-only update. The old rule let any
       // token-holder flip checkedInAt/gate on their own pass, faking a
@@ -137,6 +159,13 @@ service cloud.firestore {
       // "Already used" stamp from scans; the gate still blocks repeats.
       allow update: if isOwner(resource.data.eventId);
       allow delete: if isOwner(resource.data.eventId);
+      // V2 events are not under gp_events, so the legacy owner grant above
+      // cannot match them. The owner may revoke a pass while the event exists.
+      allow delete: if isOwnerEventV2(resource.data.eventId);
+      // A member may revoke their own pass when cancelling their RSVP.
+      allow delete: if signedIn()
+        && resource.data.id == request.auth.uid
+        && get(/databases/$(database)/documents/gp_events_v2/$(resource.data.eventId)).data.ownerId is string;
     }
 
     // The one-shot claim lives under the gate code: the code is the read capability,
@@ -146,6 +175,10 @@ service cloud.firestore {
       allow create: if !exists(/databases/$(database)/documents/gp_gates/$(code)/claims/$(passId))
         && get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId == request.resource.data.eventId
         && passMatches(request.resource.data.token, passId, request.resource.data.eventId)
+        // A v2 RSVP (id == pass id == uid) must be approved before its pass
+        // can be claimed. Legacy passes have no RSVP doc, hence !exists().
+        && (!exists(/databases/$(database)/documents/gp_rsvps/$(request.resource.data.eventId)/rsvps/$(passId))
+            || get(/databases/$(database)/documents/gp_rsvps/$(request.resource.data.eventId)/rsvps/$(passId)).data.status == 'approved')
         && (isOwner(request.resource.data.eventId) || request.resource.data.scannedAt == request.time)
         && request.resource.data.keys().hasOnly(['eventId', 'token', 'name', 'gate', 'device', 'scannedAt'])
         && request.resource.data.keys().hasAll(['eventId', 'token', 'name', 'gate', 'device', 'scannedAt']);
@@ -260,11 +293,10 @@ service cloud.firestore {
     // plan's gp_rsvps/{eventId}/{uid} is not a valid doc path. Use the rsvps
     // subcollection level; {uid} remains the RSVP doc id.
     match /gp_rsvps/{eventId}/rsvps/{uid} {
-      // A link-holder is signed in, so link-only private events' RSVPs are
-      // readable by any signed-in user; public events stay readable by all.
-      allow read: if get(/databases/$(database)/documents/gp_events_v2/$(eventId)).data.visibility == 'public'
-        || signedIn()
-        || isOwnerEventV2(eventId);
+      // RSVPs carry contact details and approval state: only the event owner
+      // and the member themselves may read them. Public attendee names are
+      // projected separately into gp_members_public, which anyone may read.
+      allow read: if isOwnerEventV2(eventId) || (signedIn() && uid == request.auth.uid);
       // Only the member themselves may create an RSVP. Once created, either the
       // event owner (member directory edits) or the member (own details) may
       // update/delete it.
@@ -272,6 +304,32 @@ service cloud.firestore {
       allow update: if isOwnerEventV2(eventId)
         || (signedIn() && uid == request.auth.uid && memberUpdateApprovalOk(eventId));
       allow delete: if isOwnerEventV2(eventId) || (signedIn() && uid == request.auth.uid);
+    }
+
+    // The pass capability is split out of the RSVP: an RSVP reader (owner or
+    // member) can never leak a token just by reading a different collection.
+    // A Firestore doc path needs an even number of segments, so the token doc
+    // lives at gp_pass_tokens/{eventId}/tokens/{uid} rather than the odd
+    // gp_pass_tokens/{eventId}/{uid} (same fix as gp_rsvps above).
+    match /gp_pass_tokens/{eventId}/tokens/{uid} {
+      allow read: if signedIn() && (uid == request.auth.uid || isOwnerEventV2(eventId));
+      // A member creates their token doc only in the same batch as their own
+      // approved RSVP on a non-approval event.
+      allow create: if signedIn() && uid == request.auth.uid
+        && getAfter(/databases/$(database)/documents/gp_rsvps/$(eventId)/rsvps/$(uid)).data.status == 'approved'
+        && get(/databases/$(database)/documents/gp_events_v2/$(eventId)).data.get('approval', false) == false
+        && request.resource.data.keys().hasOnly(['passToken', 'updatedAt']);
+      // The owner creates a token doc when approving a member.
+      allow create: if signedIn() && isOwnerEventV2(eventId)
+        && request.resource.data.keys().hasOnly(['passToken', 'updatedAt']);
+      allow update, delete: if signedIn() && (uid == request.auth.uid || isOwnerEventV2(eventId));
+    }
+
+    // Public name-only projection for attendee counts/avatars. No email,
+    // phone, answers, approval state or token is ever stored here.
+    match /gp_members_public/{eventId}/m/{uid} {
+      allow read: if true;
+      allow create, update, delete: if signedIn() && (uid == request.auth.uid || isOwnerEventV2(eventId));
     }
   }
 }
