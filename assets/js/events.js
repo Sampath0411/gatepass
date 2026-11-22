@@ -189,13 +189,21 @@ async function loadEvents() {
   await Promise.all(state.events.map(async (e) => { e._rsvps = await rsvpsFor(e.id); }));
   return state.events;
 }
-async function rsvpsFor(id) {
+// `event` defaults to the event on screen (state.currentEvent). The detail
+// view passes the event it just loaded so the owner check is made against the
+// right event even before state.currentEvent is swapped in.
+async function rsvpsFor(id, event = state.currentEvent) {
   if (DEMO) return (state.rsvps[id] = state.rsvps[id] || demoRsvps(id));
   if (state.rsvps[id]) return state.rsvps[id];
+  // Full RSVP rows carry contact details and are owner-only. Everyone else —
+  // including private-link visitors — uses the world-readable, name-only
+  // projection so avatars and going counts still work.
+  const owner = !!state.user && event?.id === id && event.ownerId === state.user.uid;
   try {
-    state.rsvps[id] = await fb.listRsvps(id);
+    const rows = owner ? await fb.listRsvps(id) : await fb.listPublicMembers(id);
+    state.rsvps[id] = owner ? rows : rows.map((m) => ({ uid: m.uid, name: m.name || "" }));
   } catch (e) {
-    console.warn("listRsvps failed", e);
+    console.warn(owner ? "listRsvps failed" : "listPublicMembers failed", e);
     state.rsvps[id] = [];
   }
   return state.rsvps[id];
@@ -758,7 +766,7 @@ async function renderEvent(id, seq) {
       <a href="#/">Back to events</a></div>`);
     return;
   }
-  const rsvps = await rsvpsFor(id);
+  const rsvps = await rsvpsFor(id, ev);
   if (renderSeq !== seq) return;
   const mine = !!state.user && rsvps.some((r) => r.uid === state.user.uid);
   const owner = !!state.user && ev.ownerId === state.user.uid;
@@ -912,7 +920,9 @@ function openRsvpForm(ev, existing = null, ownerMode = false) {
         } else {
           await fb.updateRsvp(ev.id, uid, answers);
         }
-        state.rsvps[ev.id] = await fb.listRsvps(ev.id);
+        // The next render re-reads through rsvpsFor(), which picks the source
+        // allowed for this viewer (owner list vs. public projection).
+        delete state.rsvps[ev.id];
       } else {
         const u = await signedIn();
         if (!u) {
@@ -920,7 +930,7 @@ function openRsvpForm(ev, existing = null, ownerMode = false) {
           return;
         }
         await fb.rsvpEvent(ev.id, u, answers);
-        state.rsvps[ev.id] = await fb.listRsvps(ev.id);
+        delete state.rsvps[ev.id];
       }
       closeRsvpForm();
       let message = ownerMode ? "Member updated" : existing ? "Details updated" : "You're going!";
@@ -1155,7 +1165,7 @@ async function doCancelRsvp(id) {
       state.rsvps[id] = (state.rsvps[id] || []).filter((r) => r.uid !== state.user?.uid);
     } else {
       await fb.cancelRsvp(id, state.user);
-      state.rsvps[id] = await fb.listRsvps(id);
+      delete state.rsvps[id];
     }
     toast("RSVP cancelled", "check");
     await refreshEventView(id);
