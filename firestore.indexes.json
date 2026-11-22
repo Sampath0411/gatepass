@@ -1,13 +1,6 @@
 {
   "indexes": [
     {
-      "collectionGroup": "roster",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "nameLower", "order": "ASCENDING" }
-      ]
-    },
-    {
       "collectionGroup": "gp_events_v2",
       "queryScope": "COLLECTION",
       "fields": [
