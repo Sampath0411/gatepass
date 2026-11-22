@@ -79,7 +79,7 @@ Turn GatePass from a single-event tool into a **fest platform**: one fest contai
 
 ## Testing
 
-- Rules unit tests: descriptor signed-in `get` / no `list`; student can create own pass+registration+roster but not someone else's; owner-only reads of unified registration; registration blocked when closed/full; no `gateCode` in public pass doc.
+- Rules unit tests: descriptor signed-in `get` / no `list`; student can create own pass+registration+roster but not someone else's; owner-only reads of unified registration; registration blocked when closed; no `gateCode` in public pass doc.
 - E2E: create fest → create two sub-events → two students register → organiser sees both rows → Sheets append is stubbed and both rows are appended exactly once (`sheetSynced` flips) → each pass scans green once and red on repeat at its own gate.
 
 ## Out of scope (Phase B)
