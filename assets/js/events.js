@@ -1,7 +1,7 @@
 // Luma-style events homepage — feed, calendar, discover, create, detail + RSVP.
 import * as fb from "./firebase.js";
 import {
-  ART, I, artUrl, esc, fmtWhen, fmtTime,
+  ART, I, artUrl, esc, fmtWhen, fmtTime, passUrl, gateUrl, fmtCode, copyText,
   configured as coreConfigured, toast, download, DB_MSG,
 } from "./core.js";
 import { toCsv } from "./csv.js";
@@ -32,6 +32,7 @@ const state = {
   currentEvent: null,  // event behind the organiser member directory
   members: [],         // RSVP rows shown in the member directory
   memberQuery: "",
+  myPass: null,        // { status, passToken } for the signed-in member (requestPass)
 };
 let mountNode = null;
 let renderSeq = 0;
@@ -66,6 +67,8 @@ const IX = {
   search: ic('<circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/>'),
   spark: ic('<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.8 2.8M15.2 15.2 18 18M18 6l-2.8 2.8M8.8 15.2 6 18"/>'),
   close: ic('<path d="M6 6l12 12M18 6 6 18"/>'),
+  share: ic('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/>'),
+  pass: ic('<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M8 6v12M16 6v12"/>'),
 };
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -657,7 +660,34 @@ async function onSubmit(e) {
 }
 
 // ── detail + RSVP ───────────────────────────────────────────────────────────
-function detailHTML(ev, rsvps, mine, owner, full) {
+function statusPill(status) {
+  const s = status || "approved";
+  const label = s === "pending" ? "Pending" : s === "rejected" ? "Rejected" : "Approved";
+  return `<span class="l-status-pill is-${esc(s)}">${esc(label)}</span>`;
+}
+function passStatusHTML(pass) {
+  if (!pass || !pass.status) return "";
+  if (pass.status === "pending") {
+    return `<div class="l-status-banner is-pending">${IX.clock}<span>Awaiting approval</span></div>`;
+  }
+  if (pass.status === "rejected") {
+    return `<div class="l-status-banner is-rejected">${IX.close}<span>Request wasn't approved — update and resubmit</span></div>`;
+  }
+  if (pass.passToken) {
+    return `<a class="l-pass-link" href="${esc(passUrl(pass.passToken))}" target="_blank" rel="noopener">
+      ${IX.pass}<span>Open my pass</span>${IX.arrow}</a>`;
+  }
+  return `<div class="l-status-banner is-approved">${I.check}<span>You're approved</span></div>`;
+}
+function gatePanelHTML(ev) {
+  if (!ev.gate_code) return "";
+  return `<div class="l-gate-panel">
+    <div class="l-gate-label">Your gate code</div>
+    <div class="l-gate-code">${esc(fmtCode(ev.gate_code))}</div>
+    <button type="button" class="l-outline l-gate-copy" data-action="copy-gate">${I.link}<span>Copy gate link</span></button>
+  </div>`;
+}
+function detailHTML(ev, rsvps, mine, owner, full, myPass) {
   const p = dateParts(ev.startsAt);
   const pe = dateParts(ev.endsAt);
   const when = p ? `${p.when}${pe ? " → " + pe.time : ""}` : "Date to be announced";
@@ -671,6 +701,7 @@ function detailHTML(ev, rsvps, mine, owner, full) {
     </div>`;
   } else if (mine) {
     cta = `<div class="l-rsvp-actions">
+      ${passStatusHTML(myPass)}
       <button class="l-primary l-block" data-action="edit-rsvp" data-id="${esc(ev.id)}">${IX.edit} Edit my details</button>
       <button class="l-outline l-block" data-action="cancel-rsvp" data-id="${esc(ev.id)}">Cancel RSVP</button>
     </div>`;
@@ -683,7 +714,10 @@ function detailHTML(ev, rsvps, mine, owner, full) {
     <div class="l-detail-cover" style="background-image:url('${coverUrl(ev.cover)}')"></div>
     <div class="l-detail-grid">
       <div class="l-detail-main">
-        <div class="l-detail-kicker">${esc(artName(ev.cover))} · ${ev.visibility === "private" ? "Private" : "Public"}</div>
+        <div class="l-detail-headrow">
+          <div class="l-detail-kicker">${esc(artName(ev.cover))} · ${ev.visibility === "private" ? "Private" : "Public"}</div>
+          <button type="button" class="l-share-btn" data-action="share" title="Share this event" aria-label="Share this event">${IX.share}<span>Share</span></button>
+        </div>
         <h1 class="l-detail-title">${esc(ev.title || "Untitled event")}</h1>
         <div class="l-detail-facts">
           <div>${IX.calendar}<span>${esc(when)}</span></div>
@@ -699,6 +733,7 @@ function detailHTML(ev, rsvps, mine, owner, full) {
       <aside class="l-rsvp-card">
         <div class="l-rsvp-top"><strong>${rsvps.length} going</strong><span class="l-going-dot"></span></div>
         ${avatarStack(rsvps, 6)}
+        ${owner ? gatePanelHTML(ev) : ""}
         ${owner ? `<div class="l-owner-note">You're hosting this event</div>` : ""}
         ${cta}
         ${ev.capacity ? `<p class="l-cap-note">${rsvps.length} of ${ev.capacity} spots taken</p>` : ""}
@@ -722,10 +757,23 @@ async function renderEvent(id, seq) {
   const mine = !!state.user && rsvps.some((r) => r.uid === state.user.uid);
   const owner = !!state.user && ev.ownerId === state.user.uid;
   const full = ev.capacity > 0 && rsvps.length >= ev.capacity && !mine;
+  // The member list deliberately hides passToken, so read the signed-in member's
+  // own RSVP directly for their approval state / pass link.
+  let myPass = null;
+  if (mine && !owner) {
+    if (DEMO) {
+      myPass = ev.approval ? { status: "pending", passToken: null } : { status: "approved", passToken: null };
+    } else {
+      try { myPass = await fb.requestPass(id); }
+      catch (e) { console.warn("requestPass failed", e); }
+    }
+  }
+  if (renderSeq !== seq) return;
+  state.myPass = myPass;
   if (state.currentEvent?.id !== id) state.memberQuery = "";
   state.currentEvent = ev;
   state.members = rsvps;
-  setView(detailHTML(ev, rsvps, mine, owner, full));
+  setView(detailHTML(ev, rsvps, mine, owner, full, myPass));
   if (owner) renderMembers();
 }
 
@@ -850,7 +898,14 @@ function openRsvpForm(ev, existing = null, ownerMode = false) {
       } else if (existing) {
         const uid = existing.uid || state.user?.uid;
         if (!uid) throw new Error("Sign in required");
-        await fb.updateRsvp(ev.id, uid, answers);
+        if (!ownerMode && existing.status === "rejected") {
+          // A rejected approval request is resubmitted as a fresh pending request.
+          const u = await signedIn();
+          if (!u) { btn.disabled = false; btn.innerHTML = btnHTML; return; }
+          await fb.rsvpEvent(ev.id, u, answers);
+        } else {
+          await fb.updateRsvp(ev.id, uid, answers);
+        }
         state.rsvps[ev.id] = await fb.listRsvps(ev.id);
       } else {
         const u = await signedIn();
@@ -862,7 +917,16 @@ function openRsvpForm(ev, existing = null, ownerMode = false) {
         state.rsvps[ev.id] = await fb.listRsvps(ev.id);
       }
       closeRsvpForm();
-      toast(ownerMode ? "Member updated" : existing ? "Details updated" : "You're going!", "check");
+      let message = ownerMode ? "Member updated" : existing ? "Details updated" : "You're going!";
+      if (!ownerMode && !DEMO) {
+        try {
+          const pass = await fb.requestPass(ev.id);
+          state.myPass = pass;
+          if (pass.status === "pending") message = existing ? "Request resubmitted — awaiting approval" : "Request sent — awaiting approval";
+          else if (pass.status === "rejected") message = "Request wasn't approved";
+        } catch {}
+      }
+      toast(message, "check");
       await refreshEventView(ev.id);
     } catch (ex) {
       console.error(ex);
@@ -894,18 +958,26 @@ function filteredMembers() {
 }
 function memberRowsHTML(rows, fields) {
   if (!rows.length) {
-    return `<tr><td class="l-table-empty" colspan="${fields.length + 2}">No members to show.</td></tr>`;
+    return `<tr><td class="l-table-empty" colspan="${fields.length + 3}">No members to show.</td></tr>`;
   }
-  return rows.map((r) => `<tr>
+  return rows.map((r) => {
+    const pending = (r.status || "approved") === "pending";
+    return `<tr>
     ${fields.map((f) => `<td>${esc(memberValue(r, f)) || "—"}</td>`).join("")}
+    <td class="l-member-status">${statusPill(r.status)}</td>
     <td class="l-member-joined">${esc(joinedLabel(r))}</td>
     <td class="l-member-actions">
+      ${pending ? `<button type="button" class="l-mini-btn is-approve" data-action="member-approve" data-uid="${esc(r.uid)}"
+        title="Approve member">${I.check}<span>Approve</span></button>
+      <button type="button" class="l-mini-btn is-reject" data-action="member-reject" data-uid="${esc(r.uid)}"
+        title="Reject member">${IX.close}<span>Reject</span></button>` : ""}
       <button type="button" class="l-mini-btn" data-action="member-edit" data-uid="${esc(r.uid)}"
         title="Edit member">${IX.edit}<span>Edit</span></button>
       <button type="button" class="l-mini-btn is-danger" data-action="member-delete" data-uid="${esc(r.uid)}"
         title="Remove member">${IX.close}<span>Remove</span></button>
     </td>
-  </tr>`).join("");
+  </tr>`;
+  }).join("");
 }
 function renderMembers() {
   const root = $("#l-members", mountNode);
@@ -930,7 +1002,7 @@ function renderMembers() {
     <div class="l-member-table-wrap">
       <table class="l-member-table">
         <thead><tr>${fields.map((f) => `<th scope="col">${esc(f.label || f.key)}</th>`).join("")}
-          <th scope="col">Joined</th><th scope="col">Actions</th></tr></thead>
+          <th scope="col">Status</th><th scope="col">Joined</th><th scope="col">Actions</th></tr></thead>
         <tbody id="l-member-rows">${memberRowsHTML(rows, fields)}</tbody>
       </table>
     </div>
@@ -958,8 +1030,8 @@ function exportMembersCsv() {
   if (!ev) return;
   const fields = enabledFormFields(ev);
   const rows = filteredMembers();
-  const head = [...fields.map((f) => f.label || f.key), "Joined"];
-  const body = rows.map((r) => [...fields.map((f) => memberValue(r, f)), joinedLabel(r)]);
+  const head = [...fields.map((f) => f.label || f.key), "Status", "Joined"];
+  const body = rows.map((r) => [...fields.map((f) => memberValue(r, f)), r.status || "approved", joinedLabel(r)]);
   const slug = String(ev.title || "members").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "members";
   download(`members-${slug}.csv`, toCsv([head, ...body]));
   toast(`Exported ${rows.length} ${rows.length === 1 ? "member" : "members"}`);
@@ -980,7 +1052,42 @@ async function deleteMember(uid) {
     await refreshEventView(ev.id);
   } catch (e) { toast(e?.message || DB_MSG, "warnDot"); }
 }
+async function setMemberStatus(approve, uid) {
+  const ev = state.currentEvent;
+  if (!ev || !uid) return;
+  try {
+    if (DEMO) {
+      const member = (state.rsvps[ev.id] || []).find((r) => r.uid === uid);
+      if (member) member.status = approve ? "approved" : "rejected";
+    } else if (approve) {
+      await fb.approveMember(ev.id, uid);
+      state.rsvps[ev.id] = await fb.listRsvps(ev.id);
+    } else {
+      await fb.rejectMember(ev.id, uid);
+      state.rsvps[ev.id] = await fb.listRsvps(ev.id);
+    }
+    toast(approve ? "Member approved" : "Member rejected", "check");
+    // Re-render the detail so the member list and the RSVP counts stay in sync.
+    await refreshEventView(ev.id);
+  } catch (e) { toast(e?.message || DB_MSG, "warnDot"); }
+}
 
+async function doShare() {
+  const title = state.currentEvent?.title || document.title || "Event";
+  const url = location.href;
+  if (navigator.share) {
+    try { await navigator.share({ title, url }); return; }
+    catch (e) { if (e?.name === "AbortError") return; }
+  }
+  await copyText(url);
+  toast("Link copied");
+}
+function copyGateLink() {
+  const code = state.currentEvent?.gate_code;
+  if (!code) return;
+  copyText(gateUrl(code));
+  toast("Gate link copied");
+}
 async function doRsvp(id) { await openRsvpFor(id); }
 async function doCancelRsvp(id) {
   try {
@@ -1010,6 +1117,7 @@ async function route() {
   const seq = ++renderSeq;
   closeRsvpForm();
   state.currentEvent = null;
+  state.myPass = null;
   state.memberQuery = "";
   // RSVP counts can change in another browser while this page is open; never
   // reuse a cached count across in-app (hash) navigation.
@@ -1064,8 +1172,12 @@ function onClick(e) {
   }
   if (a === "field-add") { addFormField(); return; }
   if (a === "field-remove") { removeFormField(Number(el.dataset.index)); return; }
+  if (a === "share") { doShare(); return; }
+  if (a === "copy-gate") { copyGateLink(); return; }
   if (a === "rsvp" || a === "edit-rsvp") { doRsvp(el.dataset.id); return; }
   if (a === "cancel-rsvp") { doCancelRsvp(el.dataset.id); return; }
+  if (a === "member-approve") { setMemberStatus(true, el.dataset.uid); return; }
+  if (a === "member-reject") { setMemberStatus(false, el.dataset.uid); return; }
   if (a === "members-csv") { exportMembersCsv(); return; }
   if (a === "member-edit") {
     const member = (state.members || []).find((r) => r.uid === el.dataset.uid);

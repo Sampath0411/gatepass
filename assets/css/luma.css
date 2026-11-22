@@ -458,6 +458,15 @@ body.luma .l-detail-cover {
 body.luma .l-detail-cover::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, transparent 50%, rgba(0, 0, 0, .35)); }
 body.luma .l-detail-grid { display: grid; grid-template-columns: minmax(0, 1fr) 310px; gap: 44px; margin-top: 30px; }
 body.luma .l-detail-kicker { color: var(--l-accent); font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+body.luma .l-detail-headrow { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+body.luma .l-share-btn {
+  display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px;
+  border: 1px solid #4A4A4A; border-radius: 8px; background: #2A2A2A;
+  color: #CFCFCF; font-size: 12px; font-weight: 600; white-space: nowrap;
+  transition: background .16s, color .16s, border-color .16s;
+}
+body.luma .l-share-btn svg { width: 14px; height: 14px; }
+body.luma .l-share-btn:hover { background: #3A3A3A; color: #fff; border-color: #666; }
 body.luma .l-detail-title {
   font-size: clamp(28px, 4vw, 42px); font-weight: 700; letter-spacing: -.04em;
   line-height: 1.1; color: #F7F7F7; margin: 10px 0 20px;
@@ -485,6 +494,38 @@ body.luma .l-owner-note { margin: 16px 0 4px; font-size: 12px; color: #9A9A9A; }
 body.luma .l-rsvp-card .l-primary, body.luma .l-rsvp-card .l-outline,
 body.luma .l-rsvp-card .l-google-btn, body.luma .l-rsvp-card .l-danger { margin-top: 18px; }
 body.luma .l-cap-note { margin: 12px 0 0; font-size: 11.5px; color: #808080; text-align: center; }
+
+/* share / approval status / gate panel */
+body.luma .l-gate-panel {
+  margin-top: 18px; padding: 14px; border-radius: 10px;
+  background: #252525; border: 1px dashed #555;
+}
+body.luma .l-gate-label { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #909090; }
+body.luma .l-gate-code {
+  margin-top: 5px; font-size: 22px; font-weight: 700; letter-spacing: .12em; color: #F2F2F2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+body.luma .l-rsvp-card .l-gate-panel .l-gate-copy {
+  display: flex; width: 100%; height: 38px; gap: 8px; margin-top: 12px;
+  font-size: 12.5px; justify-content: center;
+}
+body.luma .l-gate-copy svg { width: 15px; height: 15px; }
+body.luma .l-status-banner {
+  display: flex; align-items: flex-start; gap: 8px; margin-top: 16px; padding: 10px 12px;
+  border-radius: 9px; font-size: 12px; line-height: 1.45;
+}
+body.luma .l-status-banner svg { width: 14px; height: 14px; margin-top: 1px; }
+body.luma .l-status-banner.is-pending { background: rgba(232, 168, 92, .1); border: 1px solid rgba(232, 168, 92, .24); color: #F0C890; }
+body.luma .l-status-banner.is-rejected { background: rgba(255, 80, 100, .09); border: 1px solid rgba(255, 110, 130, .26); color: #FFA0AE; }
+body.luma .l-status-banner.is-approved { background: rgba(111, 232, 160, .09); border: 1px solid rgba(111, 232, 160, .24); color: #92E6B6; }
+body.luma .l-rsvp-card .l-pass-link {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  height: 44px; margin-top: 18px; border-radius: 9px;
+  background: var(--l-accent); color: #1A1A1A; font-size: 13.5px; font-weight: 700;
+  transition: background .18s;
+}
+body.luma .l-pass-link:hover { background: #F075AC; color: #1A1A1A; }
+body.luma .l-pass-link svg { width: 16px; height: 16px; }
 
 /* ── RSVP / member edit modal ───────────────────────────────── */
 body.luma .l-modal-overlay {
@@ -566,6 +607,18 @@ body.luma .l-mini-btn svg { width: 13px; height: 13px; }
 body.luma .l-mini-btn:hover { background: #3A3A3A; color: #fff; }
 body.luma .l-mini-btn.is-danger { color: #FFA0AE; border-color: rgba(255, 110, 130, .3); }
 body.luma .l-mini-btn.is-danger:hover { background: rgba(255, 80, 100, .14); color: #FF8C9E; }
+body.luma .l-mini-btn.is-approve { color: #8FE3B2; border-color: rgba(111, 232, 160, .3); }
+body.luma .l-mini-btn.is-approve:hover { background: rgba(111, 232, 160, .14); color: #A6EEC4; }
+body.luma .l-mini-btn.is-reject { color: #F0C48A; border-color: rgba(232, 168, 92, .3); }
+body.luma .l-mini-btn.is-reject:hover { background: rgba(232, 168, 92, .14); color: #F6D6A4; }
+body.luma .l-member-status { white-space: nowrap; }
+body.luma .l-status-pill {
+  display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 700; white-space: nowrap;
+}
+body.luma .l-status-pill.is-approved { background: rgba(111, 232, 160, .12); color: #8FE3B2; }
+body.luma .l-status-pill.is-pending { background: rgba(232, 168, 92, .14); color: #F0C48A; }
+body.luma .l-status-pill.is-rejected { background: rgba(255, 90, 110, .13); color: #FF9EAC; }
 body.luma .l-table-empty { text-align: center; color: #8E8E8E !important; padding: 26px 13px !important; }
 body.luma .l-member-empty { margin: 14px 0 0; text-align: center; font-size: 12.5px; color: #8E8E8E; }
 
