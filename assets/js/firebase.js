@@ -825,6 +825,14 @@ export async function listRsvps(eventId) {
   const snap = await getDocs(collection(db, RSVPS, eventId, RSVP_SUB));
   return snap.docs.map((d) => {
     const r = d.data();
-    return { uid: d.id, name: r.name || "", email: r.email || "", at: stamp(r.at) };
+    return {
+      uid: d.id,
+      name: r.name || "", email: r.email || "",
+      phone: r.phone || "", college: r.college || "",
+      answers: r.answers || {},
+      at: stamp(r.at),
+      created_at: stamp(r.createdAt),
+      updated_at: stamp(r.updatedAt),
+    };
   });
 }
