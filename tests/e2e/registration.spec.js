@@ -174,8 +174,11 @@ const fakeAuthModule = `
  *  2. firebase/auth is fulfilled with an in-memory signed-in auth module.
  *  3. window.google is stubbed so sheets.connectSheet() gets a token immediately.
  *  4. assets/js/firebase.js is fulfilled with a copy that connects to the emulator.
+ *  5. For organiserUi contexts only, the root's events.js is fulfilled with the
+ *     organiser module, and the root document gains the #view / #role mount
+ *     nodes that organiser.js expects. Both are in-memory, test-only swaps.
  */
-async function makeContext(browser, uid) {
+async function makeContext(browser, uid, { organiserUi = false } = {}) {
   const cfg = {
     apiKey: "fake-api-key-for-emulator",
     authDomain: `${PROJECT}.firebaseapp.com`,
@@ -186,6 +189,24 @@ async function makeContext(browser, uid) {
   const context = await browser.newContext({ permissions: [], baseURL: baseUrl });
   await context.addInitScript((args) => {
     window.__GP_TEST_UID = args.uid;
+    if (args.organiserUi) {
+      // The root's Luma HTML has no #view / #role mounts. Add them before the
+      // page's module scripts run so the organiser module can boot. This runs
+      // in the page only; no production file is changed.
+      const mount = () => {
+        if (!document.body || document.getElementById("view")) return;
+        document.body.className = "wide";
+        const main = document.createElement("main");
+        main.className = "app";
+        main.innerHTML =
+          '<header class="mast"><span class="mast-role" id="role">Organiser</span></header>' +
+          '<div id="view" aria-live="polite"></div>';
+        document.body.appendChild(main);
+        document.removeEventListener("readystatechange", mount);
+      };
+      document.addEventListener("readystatechange", mount);
+      mount();
+    }
     window.google = {
       accounts: {
         oauth2: {
@@ -203,7 +224,7 @@ async function makeContext(browser, uid) {
         },
       },
     };
-  }, { uid });
+  }, { uid, organiserUi });
 
   await context.route("**/firebase-config.js", (route) =>
     route.fulfill({
@@ -243,6 +264,20 @@ async function makeContext(browser, uid) {
     }
     await route.fulfill({ response, body: patched, contentType: "text/javascript; charset=utf-8" });
   });
+
+  if (organiserUi) {
+    // The root now boots events.js. Serve the still-shipped organiser module
+    // under that URL so this context renders the organiser dashboard again.
+    // Both modules import ./firebase.js, ./core.js, etc., so the relative
+    // import specifiers resolve unchanged from the swapped body.
+    const organiserModule = readFileSync(path.join(ROOT, "assets/js/organiser.js"), "utf8");
+    await context.route("**/assets/js/events.js", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/javascript; charset=utf-8",
+        body: organiserModule,
+      }));
+  }
   return context;
 }
 
@@ -278,7 +313,7 @@ test.describe("Phase A registration and live Sheet sync", () => {
     const sheetCalls = [];
 
     // ── organiser: open the fest and connect the (stubbed) Google Sheet ──
-    const organiser = await makeContext(browser, OWNER);
+    const organiser = await makeContext(browser, OWNER, { organiserUi: true });
     const organiserPage = await organiser.newPage();
     await organiserPage.route("**/sheets.googleapis.com/**", async (route) => {
       sheetCalls.push({
