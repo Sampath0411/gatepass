@@ -343,6 +343,20 @@ async function festView(id) {
     state.regs = rows;
     renderFestRegs(state);
     syncFestSheet(state);
+    // Recount each affected sub-event so its "N passes" and capacity stay
+    // accurate. Best-effort: a failed write must never break the live table.
+    const ids = [...new Set(rows.map((r) => r.eventId).filter(Boolean))];
+    ids.forEach(async (eventId) => {
+      try {
+        const total = await fb.syncEventTotals(fest.id, eventId);
+        if (!state.alive) return;
+        const sub = state.events.find((x) => x.id === eventId);
+        if (sub && sub.total !== total) {
+          sub.total = total;
+          renderFestEvents(state);
+        }
+      } catch { /* totals are advisory; the registrations table still works */ }
+    });
   });
 }
 
