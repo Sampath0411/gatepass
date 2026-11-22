@@ -2,7 +2,7 @@ import { test, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { initializeTestEnvironment, assertSucceeds, assertFails } from "@firebase/rules-unit-testing";
-import { serverTimestamp, runTransaction } from "firebase/firestore";
+import { serverTimestamp, runTransaction, writeBatch } from "firebase/firestore";
 
 const PROJECT = "gatepass-test", OWNER = "owner-uid", OTHER = "other-uid";
 const EVENT = "event-1", CODE = "ABCD2345", TOKEN = "A".repeat(32), PASS = "pass-1";
@@ -264,4 +264,159 @@ test("29. first scan + repeat scan still work as transactions (claim + gate coun
   }));
   // And the claim itself still cannot be overwritten (second first-scan).
   await assertFails(as(null).doc(`gp_gates/${CODE}/claims/${PASS}`).set(claim()));
+});
+
+// ---- Phase A: fests, sub-events, public registration (30-38) ----
+
+const FEST = "fest-1", SUBEVENT = "subevent-1", STUDENT = "student-uid";
+const FEST_CODE = "FEST2345";   // 8 characters, the same shape as a legacy gate code
+const WRONG_CODE = "WRONG234";  // a real gate doc, but NOT the descriptor's code
+
+// Fest + open sub-event + its gate + the signed-in-readable descriptor. Seeded
+// with rules disabled so each test starts from one consistent Phase A graph.
+const seedPhaseA = (overrides = {}) => env.withSecurityRulesDisabled(async (ctx) => {
+  const db = ctx.firestore();
+  const startsAt = new Date();
+  const { registrationOpen = true, descriptorCode = FEST_CODE, subEventCode = FEST_CODE } = overrides;
+  await db.doc(`gp_fests/${FEST}`).set({
+    ownerId: OWNER, name: "Spring Fest", club: "Test Club", venue: "Main Hall", art: 0,
+    startsAt, sheetId: "", sheetRange: "Registrations", createdAt: startsAt,
+  });
+  await db.doc(`gp_users/${OWNER}/fests/${FEST}`).set({ name: "Spring Fest", startsAt });
+  await db.doc(`gp_fests/${FEST}/events/${SUBEVENT}`).set({
+    festId: FEST, name: "Tech Talk", club: "Test Club", venue: "Main Hall", art: 0,
+    startsAt, gateCode: subEventCode, registrationOpen,
+    capacity: 0, total: 0, checked: 0, bounced: 0, recent: [], createdAt: startsAt,
+  });
+  await db.doc(`gp_gates/${FEST_CODE}`).set({
+    festId: FEST, eventId: SUBEVENT, name: "Tech Talk", club: "Test Club",
+    venue: "Main Hall", art: 0, startsAt,
+    total: 0, checked: 0, bounced: 0, recent: [],
+  });
+  await db.doc(`gp_reg_public/${SUBEVENT}`).set({
+    festId: FEST, name: "Tech Talk", club: "Test Club", venue: "Main Hall", art: 0,
+    startsAt, gateCode: descriptorCode, registrationOpen, capacity: 0, total: 0,
+  });
+});
+
+// The four writes registerStudentWithCode() performs, minus the roster/public
+// pass writes which have their own tests below.
+const registrationBatch = (db, { uid = STUDENT, passId = "reg-pass-1", token = "R".repeat(32), regId = "reg-1" } = {}) => {
+  const batch = writeBatch(db);
+  batch.set(db.doc(`gp_fests/${FEST}/events/${SUBEVENT}/passes/${passId}`), {
+    name: "Grace Hopper", contact: "grace@example.com", token, uid,
+    registrationId: regId, createdAt: serverTimestamp(), checkedInAt: null, gate: "",
+  });
+  batch.set(db.doc(`gp_fests/${FEST}/registrations/${regId}`), {
+    eventId: SUBEVENT, eventName: "Tech Talk", festId: FEST,
+    name: "Grace Hopper", email: "grace@example.com", phone: "", uid,
+    passId, token, createdAt: serverTimestamp(), sheetSynced: false,
+  });
+  return batch;
+};
+
+test("30. registration descriptor: signed-in get, anonymous denied, list denied", async () => {
+  await seedPhaseA();
+  await assertSucceeds(as(STUDENT).doc(`gp_reg_public/${SUBEVENT}`).get());
+  await assertSucceeds(as(OWNER).doc(`gp_reg_public/${SUBEVENT}`).get());
+  await assertFails(as(null).doc(`gp_reg_public/${SUBEVENT}`).get());
+  await assertFails(as(STUDENT).collection("gp_reg_public").get());
+  await assertFails(as(OWNER).collection("gp_reg_public").get());
+});
+
+test("31. student can create their own pass and registration on an open event", async () => {
+  await seedPhaseA();
+  await assertSucceeds(registrationBatch(as(STUDENT)).commit());
+});
+
+test("32. a student cannot register with somebody else's uid", async () => {
+  await seedPhaseA();
+  await assertFails(registrationBatch(as(STUDENT), { uid: OTHER }).commit());
+});
+
+test("33. registrations are readable only by the fest owner", async () => {
+  await seedPhaseA();
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().doc(`gp_fests/${FEST}/registrations/reg-1`).set({
+      festId: FEST, eventId: SUBEVENT, uid: STUDENT, name: "Grace Hopper",
+      email: "grace@example.com", phone: "", passId: "reg-pass-1",
+      token: "R".repeat(32), createdAt: new Date(), sheetSynced: false,
+    });
+  });
+  await assertSucceeds(as(OWNER).doc(`gp_fests/${FEST}/registrations/reg-1`).get());
+  await assertSucceeds(as(OWNER).collection(`gp_fests/${FEST}/registrations`).get());
+  await assertFails(as(STUDENT).doc(`gp_fests/${FEST}/registrations/reg-1`).get());
+  await assertFails(as(OTHER).doc(`gp_fests/${FEST}/registrations/reg-1`).get());
+  await assertFails(as(null).doc(`gp_fests/${FEST}/registrations/reg-1`).get());
+  await assertFails(as(STUDENT).collection(`gp_fests/${FEST}/registrations`).get());
+});
+
+test("34. registration on a closed event is denied", async () => {
+  await seedPhaseA({ registrationOpen: false });
+  await assertFails(registrationBatch(as(STUDENT)).commit());
+});
+
+test("35. the public pass doc never carries the gate code", async () => {
+  await seedPhaseA();
+  const token = "P".repeat(32);
+  const pass = {
+    id: "pub-pass-1", festId: FEST, eventId: SUBEVENT,
+    event: { name: "Tech Talk", club: "Test Club", starts_at: "2026-11-22T10:00:00.000Z", venue: "Main Hall", art: 0 },
+    name: "Grace Hopper", checkedInAt: null, gate: "",
+  };
+  // The student create grant uses hasOnly(), so a gateCode field is refused.
+  await assertFails(as(STUDENT).doc(`gp_passes/${token}`).set({ ...pass, gateCode: FEST_CODE }));
+  await assertSucceeds(as(STUDENT).doc(`gp_passes/${token}`).set(pass));
+  const pub = await as(null).doc(`gp_passes/${token}`).get();
+  assert.equal(pub.data().gateCode, undefined);
+  assert.equal(pub.data().event.gateCode, undefined);
+});
+
+test("36. roster create by a student: matching descriptor code allowed, wrong code denied", async () => {
+  await seedPhaseA();
+  // A second, real gate doc for the same sub-event — but the descriptor says FEST_CODE.
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().doc(`gp_gates/${WRONG_CODE}`).set({
+      festId: FEST, eventId: SUBEVENT, name: "Tech Talk",
+      total: 0, checked: 0, bounced: 0, recent: [],
+    });
+  });
+  const rosterRow = { name: "Grace Hopper", nameLower: "grace hopper", hint: "gr•••@example.com",
+    token: "R".repeat(32), checkedInAt: null, gate: "" };
+  await assertSucceeds(as(STUDENT).doc(`gp_gates/${FEST_CODE}/roster/roster-1`).set(rosterRow));
+  await assertFails(as(STUDENT).doc(`gp_gates/${WRONG_CODE}/roster/roster-2`).set(rosterRow));
+  // Anonymous gate staff still cannot write a roster entry.
+  await assertFails(as(null).doc(`gp_gates/${FEST_CODE}/roster/roster-3`).set(rosterRow));
+});
+
+test("37. fest sub-event gate create: owner allowed, non-owner denied", async () => {
+  await seedPhaseA();
+  const NEW_CODE = "FEST5678", OTHER_CODE = "FEST9999";
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    // Two sub-events, each expecting a different (not yet existing) gate code.
+    for (const [id, code] of [["subevent-2", NEW_CODE], ["subevent-3", OTHER_CODE]]) {
+      await ctx.firestore().doc(`gp_fests/${FEST}/events/${id}`).set({
+        festId: FEST, name: "Quiz Night", gateCode: code, registrationOpen: true,
+        total: 0, checked: 0, bounced: 0, recent: [],
+      });
+    }
+  });
+  const gate = (id) => ({ festId: FEST, eventId: id, name: "Quiz Night",
+    total: 0, checked: 0, bounced: 0, recent: [] });
+  // Fresh codes, so these are genuine create operations.
+  await assertSucceeds(as(OWNER).doc(`gp_gates/${NEW_CODE}`).set(gate("subevent-2")));
+  await assertFails(as(OTHER).doc(`gp_gates/${OTHER_CODE}`).set(gate("subevent-3")));
+  await assertFails(as(null).doc(`gp_gates/${OTHER_CODE}`).set(gate("subevent-3")));
+  // A non-owner cannot edit an existing fest gate's metadata either (a no-op
+  // write with unchanged fields is allowed for counter updates, but not this).
+  await assertFails(as(OTHER).doc(`gp_gates/${NEW_CODE}`).update({ name: "Hacked" }));
+});
+
+test("38. the fest owner can read a sub-event; another user cannot", async () => {
+  await seedPhaseA();
+  await assertSucceeds(as(OWNER).doc(`gp_fests/${FEST}/events/${SUBEVENT}`).get());
+  await assertSucceeds(as(OWNER).doc(`gp_fests/${FEST}`).get());
+  await assertFails(as(STUDENT).doc(`gp_fests/${FEST}/events/${SUBEVENT}`).get());
+  await assertFails(as(OTHER).doc(`gp_fests/${FEST}`).get());
+  await assertFails(as(null).collection("gp_fests").get());
 });

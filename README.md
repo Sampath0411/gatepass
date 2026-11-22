@@ -1,6 +1,6 @@
 # GatePass
 
-**Free QR entry passes for college club events.** Upload your registrations sheet and everyone gets their own pass. At the gate, any phone becomes the scanner. The first scan of a pass goes green; every scan after that goes red, on every phone at the gate, with the time and gate of the first scan. So a shared screenshot works once.
+**Free QR entry passes for college club events.** Upload your registrations sheet and everyone gets their own pass. Running a fest? Group its sub-events under one fest, share a public registration link, and each student gets their pass the moment they sign in with Google. At the gate, any phone becomes the scanner. The first scan of a pass goes green; every scan after that goes red, on every phone at the gate, with the time and gate of the first scan. So a shared screenshot works once.
 
 **Use it:** https://souradip121.github.io/gatepass/
 **Or host your own copy for free** in five steps (below). No build step, no server, no paid plan.
@@ -19,8 +19,8 @@ Made by [sampath.exe](https://github.com/sampath0411).
 
 | Who | What they do | Account? |
 |---|---|---|
-| **Organiser** | Signs in with Google, creates the event, uploads the registrations CSV (or pastes rows from Google Sheets, or syncs a live Google Sheet). Gets one pass per row — copy/export the links, or tap the photo button on a row to share the full pass image (art, details and QR) straight to WhatsApp/email on mobile, or download it to attach manually. Watches "Checked in N / total" live. | Yes |
-| **Attendee** | Opens their link, shows the ticket at the gate, and can share or download the full pass photo from the pass page. A screenshot works too, once. | No |
+| **Organiser** | Signs in with Google, creates a fest with sub-events (or a single event), and uploads the registrations CSV (or pastes rows / syncs a published Google Sheet). Gets one pass per row, exports links, shares the full pass image, and watches "Checked in N / total" live. For a fest, one **All registrations** table covers every sub-event, and new sign-ups append to a connected Google Sheet. | Yes |
+| **Attendee** | For a fest sub-event, opens the public registration link, signs in with Google, fills in their name and lands straight on their QR pass. Shows the ticket at the gate and can share or download the full pass photo. A screenshot works too, once. | Google sign-in for fest registration; a shared pass link needs no account |
 | **Gate staff** | Open `/gate/`, type the event's 8-character gate code, pick a gate name and point the camera at passes. "Find by name" covers dead phones. | No |
 
 GatePass sends no email or messages itself. Each pass row has copy, WhatsApp, photo and email buttons. The email button copies the full pass photo (with that person's name and QR) to your clipboard and opens Gmail — paste it into the message (Ctrl+V, or long-press → Paste) to include the image. On mobile it can share the image directly through your phone's share sheet instead. Browsers cannot attach files through a compose link, so this paste step is necessary.
@@ -29,9 +29,18 @@ GatePass sends no email or messages itself. Each pass row has copy, WhatsApp, ph
 
 Every row whose contact is a phone number has a WhatsApp button: it opens `wa.me` with that person's pass link already written in — you tap Send in WhatsApp. The Passes panel also has a **WhatsApp delivery** box: **Send next on WhatsApp** opens one chat at a time (one tap per chat, so the browser never blocks it) and ticks each row off for the session, and **Copy all WhatsApp messages** copies every message for pasting by hand. Rows with no phone number are counted there too — use Email or Copy link for those. GatePass never sends a message on its own, uses no paid WhatsApp API, and stores no phone numbers beyond the contact column your sheet already has. Bare 10-digit Indian numbers get the `91` country code automatically.
 
+### Fests and public registration
+
+For a multi-day fest or a club fest with several programmes, open **Your events → Fests → New fest**, then add **Sub-events** under it. Each sub-event gets its own 8-character gate code and its own public **Register link** (`register/#/register/<eventId>`). Share that link with students: they sign in with Google, enter their name (email and phone are optional), and land on their pass immediately. Registration can be opened or closed per sub-event from the fest dashboard. All registrations across the fest appear in one **All registrations** table with a CSV export. A fest is optional — the original single-event flow (upload a sheet → generate passes) still works unchanged.
+
+A student's public pass document never contains the gate code. The registration descriptor is readable only after Google sign-in and cannot be listed, and the roster write is independently validated against the descriptor's code by the Security Rules. Fest registrations are readable only by the fest owner.
+
 ### Google Sheet live sync
 
-Instead of re-uploading the sheet, tap **Or sync from a Google Sheet** under registrations and paste the sheet link. GatePass reads the sheet as CSV (no API key, no Apps Script — the sheet just has to be shared: File → Share → Publish to web, or Anyone with the link can view). The rows land in the same preview as a file upload: check the name/contact columns, then tap Generate. People already on the list are skipped as duplicates — syncing never wipes existing passes, claims, or check-ins, so late Form responses just add new passes. The last synced link is remembered in that browser only. If the browser blocks the fetch, the error says so and the paste-rows box still works.
+Two different things share this name:
+
+- **Single events — read a published sheet (no API key):** tap **Or sync from a Google Sheet** under registrations and paste the sheet link. GatePass reads the sheet as CSV (no API key, no Apps Script — the sheet just has to be shared: File → Share → Publish to web, or Anyone with the link can view). The rows land in the same preview as a file upload: check the name/contact columns, then tap Generate. People already on the list are skipped as duplicates — syncing never wipes existing passes, claims, or check-ins, so late Form responses just add new passes. The last synced link is remembered in that browser only. If the browser blocks the fetch, the error says so and the paste-rows box still works.
+- **Fests — append to a private Sheet directly (OAuth):** in the fest dashboard, paste the Sheet URL and tab/range under **Google Sheet**, tap **Save**, then **Connect Google Sheet** and grant the Sheets scope. From then on, every new registration appends a row (timestamp, fest, sub-event, name, email, phone, pass link) straight from the organiser's browser to the Sheet, with no API key, server or Apps Script. The Google Cloud steps are in [`SETUP.md`](SETUP.md#direct-google-sheet-writes-oauth-client-id). **Rows only append while the fest dashboard stays open in that browser** — the connection lives in the page, so a closed tab pauses sync; unsynced rows stay pending in the table and are appended when the dashboard is opened and reconnected.
 
 ### Why a screenshot only works once
 
@@ -40,7 +49,7 @@ Every pass has a 32-character random token (192 bits), so links can't be guessed
 ### Security model
 
 - **Firestore Security Rules** guard every collection. Organisers can only read and change their own data; event data lives in owner-scoped subcollections (`gp_users/{uid}/events`, `gp_events/{eventId}/passes`, and the gate's `roster`/`claims`). The gate code is never stored in a document an attendee can read.
-- **Attendees** need no account. They read their pass from `gp_passes/{token}`, where the 32-character token (192 bits) is the document ID and the capability. It returns just that one pass (name, event, check-in time) and never contact details or anyone else's pass.
+- **Attendees** need no account to view a pass they were given: they read it from `gp_passes/{token}`, where the 32-character token (192 bits) is the document ID and the capability. It returns just that one pass (name, event, check-in time) and never contact details, the gate code or anyone else's pass. Students registering for a fest sub-event sign in with Google first; their registration is written under their own uid, and the fest's registrations collection is owner-only.
 - **Gate staff** need no account either. The 8-character gate code is a path segment (`gp_gates/{code}`) acting as the capability — 31⁸ ≈ 850 billion combinations — and Rules only allow reading a gate doc that already exists, so codes can't be enumerated. The organiser can replace the code with one tap ("New code") and the old one stops working immediately. Staff search shows masked contacts only (`an•••@gmail.com`, `•••3210`).
 - **One-shot claims** live at `gp_gates/{code}/claims/{passId}`; the document ID makes each claim unique and Security Rules enforce a single create.
 - **The gate code is a full capability — guard it.** Anyone who holds the code can read that event's roster: attendee **names, masked contacts, pass tokens and the random device IDs** recorded on scans. Share the code only with gate staff you trust, and tap **New code** to revoke it immediately if it leaks.
@@ -63,6 +72,8 @@ You need a free [Firebase](https://firebase.google.com) account and a GitHub acc
    - **Firebase Hosting:** `firebase deploy --only hosting` with the repo root as the public directory (after the `firebase login` / `firebase use` from step 3).
 5. **Test it.** Sign in with Google, make an event, upload a small CSV, and do a test scan with two phones before the real event.
 
+For fest registration and direct Sheet appends you also need a Google **OAuth client ID** (Web application) with your deployed domain as an authorised JavaScript origin, the Google Sheets API enabled, and the ID pasted into `googleOAuthClientId` in [`firebase-config.js`](firebase-config.js). The full walkthrough is in [`SETUP.md`](SETUP.md#direct-google-sheet-writes-oauth-client-id).
+
 ### Free-tier notes
 
 - **No pausing.** Firestore on the free Spark plan doesn't go to sleep, so passes and scans work whenever your event is — no "restore project" the morning of the fest. A quick test scan the day before is still a good idea.
@@ -83,18 +94,21 @@ You need a free [Firebase](https://firebase.google.com) account and a GitHub acc
 
 ## What's stored
 
-Event details, each attendee's name and the one contact column you choose (email or phone), and every scan (time, gate name, a random device id). Deleting an event deletes all of it. Attendees' pass pages show only their name, the event and whether the pass was used.
+Event details, each attendee's name and the one contact column you choose (email or phone), and every scan (time, gate name, a random device id). Fest registrations also store the student's uid, email/phone and pass link under the fest, owner-only. Deleting an event deletes its event data. Attendees' pass pages show only their name, the event and whether the pass was used.
 
 ## Files
 
 ```
-index.html              organiser app (sign-in, events, passes, gate code, live counter)
+index.html              organiser app (sign-in, fests/sub-events, events, passes, gate code, live counter)
 p/index.html            the attendee's pass, at p/#<token>
+register/index.html     public Google-signed-in registration, at register/#/register/<eventId>
 gate/index.html         the gate scanner
-firebase-config.js      your Firebase web app config (the only file you edit)
+firebase-config.js      your Firebase web app config + Google OAuth client ID (the only file you edit)
 assets/js/firebase.js   Firebase Auth + Firestore data layer (transactions, rules-friendly paths)
 assets/js/core.js       shared helpers, formatting, state
-assets/js/organiser.js  organiser dashboard
+assets/js/organiser.js  organiser dashboard (fests, registrations table, Sheet sync)
+assets/js/register.js   registration form → instant pass
+assets/js/sheets.js     Google Identity Services token client + Sheets append
 assets/js/gate.js       gate scanner UI
 assets/js/pass.js       attendee pass page
 assets/js/csv.js        CSV / Google Sheets parsing
