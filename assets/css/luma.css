@@ -318,6 +318,45 @@ body.luma .l-art-thumb.is-active::after {
 }
 body.luma .l-help { font-size: 11.5px; color: #777; margin: 11px 0 0; line-height: 1.5; }
 
+/* ── registration fields editor ──────────────────────────────── */
+body.luma .l-fields {
+  margin-top: 12px; padding: 4px 14px;
+  border: 1px solid var(--l-line); border-radius: 10px; background: var(--l-panel);
+}
+body.luma .l-field-row {
+  display: grid; grid-template-columns: 22px minmax(0, 1fr) 92px 92px 26px;
+  align-items: center; gap: 10px; min-height: 48px;
+  border-bottom: 1px solid #373737;
+}
+body.luma .l-field-row:last-child { border-bottom: 0; }
+body.luma .l-field-check, body.luma .l-field-req { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+body.luma .l-field-check input, body.luma .l-field-req input {
+  width: 15px; height: 15px; margin: 0; accent-color: var(--l-accent); cursor: pointer;
+}
+body.luma .l-field-req { font-size: 11.5px; color: #A5A5A5; white-space: nowrap; }
+body.luma .l-field-label {
+  width: 100%; height: 34px; padding: 0 10px; font-size: 13px;
+  background: #242424; border: 1px solid #3A3A3A; border-radius: 7px;
+  color: var(--l-text); outline: none; transition: border-color .16s;
+}
+body.luma .l-field-label:focus { border-color: var(--l-accent); }
+body.luma .l-field-key {
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+  color: #8B8B8B; background: #242424; border: 1px solid #3A3A3A;
+  border-radius: 5px; padding: 4px 7px; text-align: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+body.luma .l-field-key.is-preset { visibility: hidden; }
+body.luma .l-field-remove {
+  width: 26px; height: 26px; display: grid; place-items: center;
+  border-radius: 6px; color: #8A8A8A; transition: background .16s, color .16s;
+}
+body.luma .l-field-remove:hover { background: rgba(255, 80, 100, .14); color: #FF8C9E; }
+body.luma .l-field-remove svg { width: 14px; height: 14px; }
+body.luma .l-field-add { display: flex; gap: 9px; margin-top: 12px; }
+body.luma .l-field-add .l-input { flex: 1; min-width: 0; padding-left: 13px; height: 38px; }
+body.luma .l-field-add .l-outline { height: 38px; padding: 0 15px; white-space: nowrap; }
+
 body.luma .l-title-label { display: block; font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: #8A8A8A; margin-bottom: 6px; }
 body.luma .l-title-input {
   width: 100%; background: transparent; border: 0; border-bottom: 1px solid #3A3A3A; border-radius: 0;
@@ -407,7 +446,8 @@ body.luma .l-danger {
 }
 body.luma .l-danger:hover { background: rgba(255, 80, 100, .16); }
 body.luma .l-danger svg { width: 15px; height: 15px; }
-body.luma .l-owner-actions { display: flex; flex-direction: column; gap: 9px; }
+body.luma .l-owner-actions, body.luma .l-rsvp-actions { display: flex; flex-direction: column; gap: 9px; }
+body.luma .l-rsvp-actions .l-primary svg { width: 15px; height: 15px; }
 
 /* ── event detail ────────────────────────────────────────────── */
 body.luma .l-detail-cover {
@@ -445,6 +485,89 @@ body.luma .l-owner-note { margin: 16px 0 4px; font-size: 12px; color: #9A9A9A; }
 body.luma .l-rsvp-card .l-primary, body.luma .l-rsvp-card .l-outline,
 body.luma .l-rsvp-card .l-google-btn, body.luma .l-rsvp-card .l-danger { margin-top: 18px; }
 body.luma .l-cap-note { margin: 12px 0 0; font-size: 11.5px; color: #808080; text-align: center; }
+
+/* ── RSVP / member edit modal ───────────────────────────────── */
+body.luma .l-modal-overlay {
+  position: fixed; inset: 0; z-index: 300;
+  display: grid; place-items: center; padding: 16px; overflow-y: auto;
+  background: rgba(12, 12, 12, .72);
+  backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
+}
+body.luma .l-modal {
+  width: min(100%, 520px); max-height: calc(100dvh - 32px);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--l-panel); border: 1px solid #4A4A4A; border-radius: 16px;
+  box-shadow: 0 26px 70px rgba(0, 0, 0, .6);
+}
+body.luma .l-modal-head {
+  flex: none; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+  padding: 20px 20px 16px; border-bottom: 1px solid #3A3A3A;
+}
+body.luma .l-modal-title { font-size: 20px; line-height: 1.2; font-weight: 650; letter-spacing: -.02em; margin: 6px 0 0; color: #F5F5F5; }
+body.luma .l-modal-sub { font-size: 12.5px; color: var(--l-muted); margin: 6px 0 0; }
+body.luma .l-modal-close {
+  width: 30px; height: 30px; flex: none; display: grid; place-items: center;
+  border-radius: 8px; color: #9A9A9A; transition: background .16s, color .16s;
+}
+body.luma .l-modal-close:hover { background: #3A3A3A; color: #fff; }
+body.luma #l-rsvp-form { display: flex; flex-direction: column; min-height: 0; }
+body.luma .l-modal-body { padding: 18px 20px 6px; overflow-y: auto; }
+body.luma .l-modal-field { margin-bottom: 14px; }
+body.luma .l-modal-field:last-child { margin-bottom: 8px; }
+body.luma .l-modal .l-label { margin-bottom: 7px; font-size: 12.5px; color: #C9C9C9; font-weight: 550; }
+body.luma .l-modal .l-input { padding-left: 13px; height: 42px; }
+body.luma .l-modal .l-textarea { height: auto; }
+body.luma .l-modal .l-input.is-invalid { border-color: #FF8C9E; }
+body.luma .l-req { color: var(--l-accent); }
+body.luma .l-modal-error { margin: 4px 20px 0; }
+body.luma .l-modal-actions { flex: none; margin-top: 12px; padding: 14px 20px; }
+body.luma .l-modal-actions .l-primary { height: 40px; }
+body.luma .l-modal-actions .l-primary svg { width: 15px; height: 15px; }
+
+/* ── organiser member directory ─────────────────────────────── */
+body.luma .l-members { margin-top: 46px; padding-top: 26px; border-top: 1px solid #363636; }
+body.luma .l-members-head {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 18px;
+  margin-bottom: 16px; flex-wrap: wrap;
+}
+body.luma .l-members-title { font-size: 20px; font-weight: 650; letter-spacing: -.02em; margin: 6px 0 0; color: #F2F2F2; }
+body.luma .l-members-tools { display: flex; align-items: center; gap: 10px; }
+body.luma .l-member-search-wrap { max-width: 240px; margin: 0; }
+body.luma .l-member-search { height: 38px; font-size: 13px; padding-left: 38px; }
+body.luma .l-members-tools > .l-outline {
+  height: 38px; padding: 0 14px; display: inline-flex; align-items: center; gap: 8px;
+  font-size: 12.5px; white-space: nowrap;
+}
+body.luma .l-members-tools > .l-outline svg { width: 15px; height: 15px; }
+body.luma .l-member-table-wrap {
+  overflow-x: auto; background: var(--l-panel);
+  border: 1px solid var(--l-line); border-radius: 12px;
+}
+body.luma .l-member-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+body.luma .l-member-table th {
+  padding: 11px 13px; text-align: left; white-space: nowrap;
+  color: #909090; background: #262626; border-bottom: 1px solid #3A3A3A;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+}
+body.luma .l-member-table td {
+  padding: 11px 13px; color: #D2D2D2; border-bottom: 1px solid #353535;
+  max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+body.luma .l-member-table tbody tr:last-child td { border-bottom: 0; }
+body.luma .l-member-table tbody tr:hover td { background: #303030; }
+body.luma .l-member-joined { color: #929292 !important; white-space: nowrap; }
+body.luma .l-member-actions { display: flex; gap: 7px; }
+body.luma .l-mini-btn {
+  display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 9px;
+  border: 1px solid #454545; border-radius: 7px; background: #2A2A2A;
+  color: #CFCFCF; font-size: 11.5px; white-space: nowrap; transition: background .16s, color .16s;
+}
+body.luma .l-mini-btn svg { width: 13px; height: 13px; }
+body.luma .l-mini-btn:hover { background: #3A3A3A; color: #fff; }
+body.luma .l-mini-btn.is-danger { color: #FFA0AE; border-color: rgba(255, 110, 130, .3); }
+body.luma .l-mini-btn.is-danger:hover { background: rgba(255, 80, 100, .14); color: #FF8C9E; }
+body.luma .l-table-empty { text-align: center; color: #8E8E8E !important; padding: 26px 13px !important; }
+body.luma .l-member-empty { margin: 14px 0 0; text-align: center; font-size: 12.5px; color: #8E8E8E; }
 
 /* ── toast (core.js helper) ──────────────────────────────────── */
 body.luma .toast {
@@ -497,4 +620,16 @@ body.luma .toast svg { width: 18px; height: 18px; }
   body.luma .l-cal-results .l-grid { grid-template-columns: 1fr; }
   body.luma .l-detail-cover { aspect-ratio: 1.6; min-height: 180px; }
   body.luma .l-skeleton-grid { grid-template-columns: 1fr; }
+  body.luma .l-field-row { grid-template-columns: 22px minmax(0, 1fr) 26px 26px; gap: 8px; }
+  body.luma .l-field-row .l-field-key { display: none; }
+  body.luma .l-field-req span { display: none; }
+  body.luma .l-field-add { flex-direction: column; }
+  body.luma .l-members-head { align-items: flex-start; }
+  body.luma .l-members-tools { width: 100%; }
+  body.luma .l-member-search-wrap { flex: 1; max-width: none; }
+  body.luma .l-modal-overlay { padding: 10px; }
+  body.luma .l-modal-head { padding: 16px 16px 13px; }
+  body.luma .l-modal-body { padding: 16px 16px 4px; }
+  body.luma .l-modal-error { margin-left: 16px; margin-right: 16px; }
+  body.luma .l-modal-actions { padding: 13px 16px; }
 }

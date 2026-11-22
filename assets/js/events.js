@@ -2,8 +2,9 @@
 import * as fb from "./firebase.js";
 import {
   ART, I, artUrl, esc, fmtWhen, fmtTime,
-  configured as coreConfigured, toast, DB_MSG,
+  configured as coreConfigured, toast, download, DB_MSG,
 } from "./core.js";
+import { toCsv } from "./csv.js";
 
 const $ = (s, r = document) => r.querySelector(s);
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -27,9 +28,26 @@ const state = {
   calDay: null,
   discoverQ: "",
   discoverKey: "",
+  formFields: [],      // draft in the create/edit editor
+  currentEvent: null,  // event behind the organiser member directory
+  members: [],         // RSVP rows shown in the member directory
+  memberQuery: "",
 };
 let mountNode = null;
 let renderSeq = 0;
+let modalCleanup = null;
+
+// Matching firebase.js DEFAULT_FORM_FIELDS; used when an event has none stored.
+const FALLBACK_FIELDS = [
+  { key: "name", label: "Full name", type: "text", required: true, enabled: true },
+  { key: "email", label: "Email", type: "email", required: true, enabled: true },
+  { key: "phone", label: "Phone number", type: "tel", required: false, enabled: true },
+  { key: "college", label: "College", type: "text", required: false, enabled: true },
+];
+const PRESET_KEYS = new Set(["name", "email", "phone", "college"]);
+const INPUT_TYPES = ["text", "email", "tel", "number", "date", "url", "textarea"];
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const defaultFields = () => (fb.DEFAULT_FORM_FIELDS || FALLBACK_FIELDS).map((f) => ({ ...f }));
 
 // ── small icons not shipped in core.js ──────────────────────────────────────
 const ic = (body) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
@@ -47,6 +65,7 @@ const IX = {
   edit: ic('<path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="m13.5 6.5 4 4"/>'),
   search: ic('<circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/>'),
   spark: ic('<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.8 2.8M15.2 15.2 18 18M18 6l-2.8 2.8M8.8 15.2 6 18"/>'),
+  close: ic('<path d="M6 6l12 12M18 6 6 18"/>'),
 };
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -102,6 +121,32 @@ function go(hash) {
   else location.hash = hash;
 }
 function invalidate() { state.events = null; state.rsvps = {}; }
+
+// ── registration field helpers ──────────────────────────────────────────────
+function fieldSlug(label) {
+  return String(label || "").toLowerCase().trim()
+    .replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "field";
+}
+function uniqueFieldKey(base, fields) {
+  let key = base, n = 2;
+  while (fields.some((f) => f.key === key)) key = `${base}_${n++}`;
+  return key;
+}
+function enabledFormFields(ev) {
+  const src = ev?.formFields?.length ? ev.formFields : defaultFields();
+  return src.filter((f) => f && f.key && f.enabled !== false);
+}
+// RSVP docs store answers plus mapped preset columns; accept either shape.
+function memberValue(member, field) {
+  const v = member?.answers?.[field.key] ?? member?.[field.key] ?? "";
+  return v == null ? "" : String(v);
+}
+function joinedLabel(member) {
+  const raw = member?.at || member?.createdAt;
+  if (!raw) return "—";
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? "—" : fmtWhen(d);
+}
 
 // ── preview data (only when ?demo=1) ────────────────────────────────────────
 function demoEvents() {
@@ -372,6 +417,63 @@ function chipColor(key) {
 }
 
 // ── create / edit ───────────────────────────────────────────────────────────
+function fieldsHTML() {
+  return state.formFields.map((f, i) => {
+    const preset = PRESET_KEYS.has(f.key);
+    return `<div class="l-field-row" data-index="${i}">
+      <label class="l-field-check" title="Include on the RSVP form">
+        <input type="checkbox" class="f-enabled" ${f.enabled !== false ? "checked" : ""}
+          aria-label="Include ${esc(f.label || f.key)}">
+      </label>
+      <input type="text" class="l-field-label" value="${esc(f.label || "")}" maxlength="60"
+        placeholder="Field label" aria-label="Label for ${esc(f.label || f.key)}">
+      <label class="l-field-req" title="Guests must fill this in">
+        <input type="checkbox" class="f-required" ${f.required ? "checked" : ""}
+          aria-label="Make ${esc(f.label || f.key)} required"><span>Required</span>
+      </label>
+      <span class="l-field-key ${preset ? "is-preset" : ""}" title="Field key: ${esc(f.key)}">${esc(f.key)}</span>
+      ${preset ? `<span class="l-field-key-space"></span>`
+        : `<button type="button" class="l-field-remove" data-action="field-remove" data-index="${i}"
+            aria-label="Remove ${esc(f.label || f.key)}" title="Remove field">${IX.close}</button>`}
+    </div>`;
+  }).join("");
+}
+function syncFieldsFromDOM() {
+  const root = $("#l-fields", mountNode);
+  if (!root) return;
+  root.querySelectorAll(".l-field-row").forEach((row) => {
+    const f = state.formFields[Number(row.dataset.index)];
+    if (!f) return;
+    f.enabled = !!$(".f-enabled", row)?.checked;
+    f.required = !!$(".f-required", row)?.checked;
+    const label = String($(".l-field-label", row)?.value || "").trim();
+    if (label) f.label = label;
+  });
+}
+function renderFieldsUI() {
+  const root = $("#l-fields", mountNode);
+  if (root) root.innerHTML = fieldsHTML();
+}
+function addFormField() {
+  syncFieldsFromDOM();
+  const input = $("#l-new-field-label", mountNode);
+  const label = String(input?.value || "").trim();
+  if (!label) { input?.focus(); toast("Give the new field a label"); return; }
+  state.formFields.push({
+    key: uniqueFieldKey(fieldSlug(label), state.formFields),
+    label, type: "text", required: false, enabled: true,
+  });
+  input.value = "";
+  renderFieldsUI();
+  input.focus();
+}
+function removeFormField(index) {
+  syncFieldsFromDOM();
+  if (!Number.isInteger(index) || index < 0 || index >= state.formFields.length) return;
+  state.formFields.splice(index, 1);
+  renderFieldsUI();
+}
+
 function createHTML(ev) {
   const [ds, de] = defaultTimes();
   const p = ev ? (dateParts(ev.startsAt) || ds) : ds;
@@ -462,6 +564,15 @@ function createHTML(ev) {
         </div>
       </div>
 
+      <h2 class="l-section-title">Registration fields</h2>
+      <p class="l-help">Pick the details guests fill in when they RSVP. Untick a field to leave it out.</p>
+      <div class="l-fields" id="l-fields">${fieldsHTML()}</div>
+      <div class="l-field-add">
+        <input id="l-new-field-label" class="l-input" maxlength="60" autocomplete="off"
+          placeholder="New field label (e.g. Year)" aria-label="New field label">
+        <button type="button" class="l-outline" data-action="field-add">Add field</button>
+      </div>
+
       <p class="l-error" id="l-error" role="alert" hidden></p>
       <div class="l-actions">
         <a href="#/" class="l-cancel">Cancel</a>
@@ -490,6 +601,8 @@ async function renderCreate(id, seq) {
     setView(`<div class="l-notice"><h1>You can't edit this event</h1><p>Only the host can make changes.</p>
       <a href="#/${"event/" + encodeURIComponent(id)}">Back to the event</a></div>`);
   } else {
+    const stored = ev?.formFields?.length ? ev.formFields : defaultFields();
+    state.formFields = stored.map((f) => ({ ...f }));
     setView(createHTML(ev));
   }
 }
@@ -501,6 +614,7 @@ async function onSubmit(e) {
   const f = form.elements;
   const err = $("#l-error", form);
   err.hidden = true;
+  syncFieldsFromDOM();
   const title = String(f.namedItem("title")?.value || "").trim();
   const start = new Date(`${f.namedItem("startDate")?.value}T${f.namedItem("startTime")?.value || "00:00"}`);
   const end = new Date(`${f.namedItem("endDate")?.value}T${f.namedItem("endTime")?.value || "00:00"}`);
@@ -518,6 +632,10 @@ async function onSubmit(e) {
     approval: !!f.namedItem("approval")?.checked,
     capacity: Number(f.namedItem("capacity")?.value) || 0,
     visibility: f.namedItem("visibility")?.value || "public",
+    formFields: state.formFields.filter((field) => field.enabled).map((field) => ({
+      ...field,
+      label: String(field.label || field.key).trim() || field.key,
+    })),
   };
   const btn = form.querySelector('[type="submit"]');
   const label = btn.innerHTML;
@@ -552,7 +670,10 @@ function detailHTML(ev, rsvps, mine, owner, full) {
       <button class="l-danger l-block" data-action="delete" data-id="${esc(ev.id)}">${I.trash} Delete event</button>
     </div>`;
   } else if (mine) {
-    cta = `<button class="l-outline l-block" data-action="cancel-rsvp" data-id="${esc(ev.id)}">Cancel RSVP</button>`;
+    cta = `<div class="l-rsvp-actions">
+      <button class="l-primary l-block" data-action="edit-rsvp" data-id="${esc(ev.id)}">${IX.edit} Edit my details</button>
+      <button class="l-outline l-block" data-action="cancel-rsvp" data-id="${esc(ev.id)}">Cancel RSVP</button>
+    </div>`;
   } else {
     cta = `<button class="l-primary l-block" data-action="rsvp" data-id="${esc(ev.id)}" ${full ? "disabled" : ""}>
       ${full ? "Event is full" : ev.approval ? "Request to attend" : "RSVP"}${full ? "" : IX.arrow}</button>`;
@@ -583,7 +704,8 @@ function detailHTML(ev, rsvps, mine, owner, full) {
         ${ev.capacity ? `<p class="l-cap-note">${rsvps.length} of ${ev.capacity} spots taken</p>` : ""}
       </aside>
     </div>
-  </div>`;
+  </div>
+  ${owner ? `<section class="l-members" id="l-members" aria-label="Members"></section>` : ""}`;
 }
 async function renderEvent(id, seq) {
   let ev = null;
@@ -600,22 +722,266 @@ async function renderEvent(id, seq) {
   const mine = !!state.user && rsvps.some((r) => r.uid === state.user.uid);
   const owner = !!state.user && ev.ownerId === state.user.uid;
   const full = ev.capacity > 0 && rsvps.length >= ev.capacity && !mine;
+  if (state.currentEvent?.id !== id) state.memberQuery = "";
+  state.currentEvent = ev;
+  state.members = rsvps;
   setView(detailHTML(ev, rsvps, mine, owner, full));
+  if (owner) renderMembers();
 }
-async function doRsvp(id) {
+
+// Re-render just the detail view after a write so the fresh RSVP list (and any
+// search text) survives — a full route() would clear the cache and the search.
+async function refreshEventView(id) {
+  await renderEvent(id, renderSeq);
+}
+
+// ── RSVP modal ──────────────────────────────────────────────────────────────
+function closeRsvpForm() {
+  if (!modalCleanup) return;
+  const cleanup = modalCleanup;
+  modalCleanup = null;
+  cleanup();
+}
+function answerFor(field, existing) {
+  const a = existing?.answers || {};
+  let v = a[field.key];
+  if ((v === undefined || v === null || v === "") && PRESET_KEYS.has(field.key)) {
+    v = existing?.[field.key];
+  }
+  if ((v === undefined || v === null || v === "") && !existing) {
+    if (field.key === "name") v = state.user?.displayName || "";
+    if (field.key === "email") v = state.user?.email || "";
+  }
+  return v == null ? "" : String(v);
+}
+function rsvpInputHTML(field, existing) {
+  const type = INPUT_TYPES.includes(field.type) ? field.type : "text";
+  const id = `l-rsvp-${esc(field.key)}`;
+  const label = esc(field.label || field.key);
+  const required = field.required ? ' required aria-required="true"' : "";
+  const star = field.required ? ' <span class="l-req">*</span>' : "";
+  const common = `id="${id}" data-key="${esc(field.key)}" class="l-input"${required}`;
+  const value = esc(answerFor(field, existing));
+  if (type === "textarea") {
+    return `<div class="l-modal-field"><label class="l-label" for="${id}">${label}${star}</label>
+      <textarea ${common} rows="3">${value}</textarea></div>`;
+  }
+  const auto = field.key === "name" ? "name" : field.key === "email" ? "email"
+    : field.key === "phone" ? "tel" : "off";
+  return `<div class="l-modal-field"><label class="l-label" for="${id}">${label}${star}</label>
+    <input ${common} type="${type}" autocomplete="${auto}" value="${value}"></div>`;
+}
+function openRsvpForm(ev, existing = null, ownerMode = false) {
+  closeRsvpForm();
+  const fields = enabledFormFields(ev);
+  const overlay = document.createElement("div");
+  overlay.className = "l-modal-overlay";
+  overlay.innerHTML = `
+    <div class="l-modal" role="dialog" aria-modal="true" aria-labelledby="l-rsvp-title">
+      <div class="l-modal-head">
+        <div>
+          <div class="l-eyebrow">${ownerMode ? "Guest details" : "RSVP"}</div>
+          <h2 class="l-modal-title" id="l-rsvp-title">${ownerMode ? "Edit member" : esc(ev.title || "Event")}</h2>
+          <p class="l-modal-sub">${ownerMode
+            ? "Update the details stored for this guest."
+            : existing ? "Update your details for this event." : "Fill in your details to join this event."}</p>
+        </div>
+        <button type="button" class="l-modal-close" data-close-modal aria-label="Close">${IX.close}</button>
+      </div>
+      <form id="l-rsvp-form" novalidate>
+        <div class="l-modal-body">
+          ${fields.length ? fields.map((f) => rsvpInputHTML(f, existing)).join("")
+            : `<p class="l-help">This event doesn't ask for any extra details.</p>`}
+        </div>
+        <p class="l-error l-modal-error" data-modal-error role="alert" hidden></p>
+        <div class="l-actions l-modal-actions">
+          <button type="button" class="l-cancel" data-close-modal>Cancel</button>
+          <button type="submit" class="l-primary">${ownerMode ? "Save changes" : "Submit RSVP"}${IX.arrow}</button>
+        </div>
+      </form>
+    </div>`;
+  document.body.append(overlay);
+  const form = $("#l-rsvp-form", overlay);
+  const err = $("[data-modal-error]", overlay);
+  const btn = form.querySelector('[type="submit"]');
+  const btnHTML = btn.innerHTML;
+
+  const onKey = (e) => { if (e.key === "Escape") closeRsvpForm(); };
+  modalCleanup = () => { document.removeEventListener("keydown", onKey); overlay.remove(); };
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay || e.target.closest("[data-close-modal]")) closeRsvpForm();
+  });
+  document.addEventListener("keydown", onKey);
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    err.hidden = true;
+    const answers = {};
+    let firstBad = null;
+    for (const input of form.querySelectorAll("[data-key]")) {
+      const key = input.dataset.key;
+      const field = fields.find((f) => f.key === key) || {};
+      const value = String(input.value || "").trim();
+      input.classList.remove("is-invalid");
+      if (field.required && !value) { input.classList.add("is-invalid"); firstBad = firstBad || input; }
+      if (field.type === "email" && value && !EMAIL_RE.test(value)) {
+        input.classList.add("is-invalid"); firstBad = firstBad || input;
+      }
+      answers[key] = value;
+    }
+    if (firstBad) {
+      showError(err, "Please complete the highlighted fields before continuing.");
+      firstBad.focus();
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    try {
+      if (DEMO) {
+        const uid = existing?.uid || (ownerMode ? "demo-member" : state.user?.uid) || "demo-you";
+        const merged = { ...(existing || {}), uid, answers };
+        for (const key of PRESET_KEYS) merged[key] = answers[key] ?? merged[key] ?? "";
+        const list = [...(state.rsvps[ev.id] || [])];
+        const at = list.findIndex((r) => r.uid === uid);
+        if (at >= 0) list[at] = merged;
+        else list.push(merged);
+        state.rsvps[ev.id] = list;
+      } else if (existing) {
+        const uid = existing.uid || state.user?.uid;
+        if (!uid) throw new Error("Sign in required");
+        await fb.updateRsvp(ev.id, uid, answers);
+        state.rsvps[ev.id] = await fb.listRsvps(ev.id);
+      } else {
+        const u = await signedIn();
+        if (!u) {
+          btn.disabled = false; btn.innerHTML = btnHTML;
+          return;
+        }
+        await fb.rsvpEvent(ev.id, u, answers);
+        state.rsvps[ev.id] = await fb.listRsvps(ev.id);
+      }
+      closeRsvpForm();
+      toast(ownerMode ? "Member updated" : existing ? "Details updated" : "You're going!", "check");
+      await refreshEventView(ev.id);
+    } catch (ex) {
+      console.error(ex);
+      showError(err, ex?.message || DB_MSG);
+      btn.disabled = false;
+      btn.innerHTML = btnHTML;
+    }
+  });
+  requestAnimationFrame(() => form.querySelector("[data-key]")?.focus());
+}
+async function openRsvpFor(id) {
   const u = await signedIn();
   if (!u) return;
+  let ev = DEMO ? demoEvents().find((e) => e.id === id) : (state.events || []).find((e) => e.id === id);
+  if (!ev && !DEMO) { try { ev = await fb.getV2Event(id); } catch {} }
+  if (!ev) return;
+  const rsvps = await rsvpsFor(id);
+  openRsvpForm(ev, rsvps.find((r) => r.uid === u.uid) || null);
+}
+
+// ── organiser member directory ──────────────────────────────────────────────
+function filteredMembers() {
+  const q = String(state.memberQuery || "").trim().toLowerCase();
+  if (!q) return state.members || [];
+  const fields = enabledFormFields(state.currentEvent);
+  return (state.members || []).filter((r) =>
+    fields.some((f) => memberValue(r, f).toLowerCase().includes(q)) ||
+    joinedLabel(r).toLowerCase().includes(q));
+}
+function memberRowsHTML(rows, fields) {
+  if (!rows.length) {
+    return `<tr><td class="l-table-empty" colspan="${fields.length + 2}">No members to show.</td></tr>`;
+  }
+  return rows.map((r) => `<tr>
+    ${fields.map((f) => `<td>${esc(memberValue(r, f)) || "—"}</td>`).join("")}
+    <td class="l-member-joined">${esc(joinedLabel(r))}</td>
+    <td class="l-member-actions">
+      <button type="button" class="l-mini-btn" data-action="member-edit" data-uid="${esc(r.uid)}"
+        title="Edit member">${IX.edit}<span>Edit</span></button>
+      <button type="button" class="l-mini-btn is-danger" data-action="member-delete" data-uid="${esc(r.uid)}"
+        title="Remove member">${IX.close}<span>Remove</span></button>
+    </td>
+  </tr>`).join("");
+}
+function renderMembers() {
+  const root = $("#l-members", mountNode);
+  const ev = state.currentEvent;
+  if (!root || !ev) return;
+  const fields = enabledFormFields(ev);
+  const rows = filteredMembers();
+  root.innerHTML = `
+    <div class="l-members-head">
+      <div>
+        <div class="l-eyebrow">Your guest list</div>
+        <h2 class="l-members-title">Members (${state.members.length})</h2>
+      </div>
+      <div class="l-members-tools">
+        <div class="l-search-wrap l-member-search-wrap">${IX.search}
+          <input id="l-member-search" class="l-search l-member-search" type="search" autocomplete="off"
+            placeholder="Search members…" value="${esc(state.memberQuery)}" aria-label="Search members">
+        </div>
+        <button type="button" class="l-outline" data-action="members-csv" title="Download members as CSV">${IX.arrow} Export CSV</button>
+      </div>
+    </div>
+    <div class="l-member-table-wrap">
+      <table class="l-member-table">
+        <thead><tr>${fields.map((f) => `<th scope="col">${esc(f.label || f.key)}</th>`).join("")}
+          <th scope="col">Joined</th><th scope="col">Actions</th></tr></thead>
+        <tbody id="l-member-rows">${memberRowsHTML(rows, fields)}</tbody>
+      </table>
+    </div>
+    <p class="l-member-empty" id="l-member-empty" ${rows.length ? "hidden" : ""}>${
+      state.memberQuery.trim()
+        ? "No members match your search."
+        : "No members yet — they'll appear here when people RSVP."
+    }</p>`;
+}
+function refreshMembersTable() {
+  const body = $("#l-member-rows", mountNode);
+  if (!body) return;
+  const rows = filteredMembers();
+  body.innerHTML = memberRowsHTML(rows, enabledFormFields(state.currentEvent));
+  const empty = $("#l-member-empty", mountNode);
+  if (empty) {
+    empty.hidden = rows.length > 0;
+    empty.textContent = state.memberQuery.trim()
+      ? "No members match your search."
+      : "No members yet — they'll appear here when people RSVP.";
+  }
+}
+function exportMembersCsv() {
+  const ev = state.currentEvent;
+  if (!ev) return;
+  const fields = enabledFormFields(ev);
+  const rows = filteredMembers();
+  const head = [...fields.map((f) => f.label || f.key), "Joined"];
+  const body = rows.map((r) => [...fields.map((f) => memberValue(r, f)), joinedLabel(r)]);
+  const slug = String(ev.title || "members").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "members";
+  download(`members-${slug}.csv`, toCsv([head, ...body]));
+  toast(`Exported ${rows.length} ${rows.length === 1 ? "member" : "members"}`);
+}
+async function deleteMember(uid) {
+  const ev = state.currentEvent;
+  const member = (state.members || []).find((r) => r.uid === uid);
+  if (!ev || !uid) return;
+  if (!window.confirm(`Remove ${member?.name || member?.email || "this member"} from this event? This can't be undone.`)) return;
   try {
     if (DEMO) {
-      state.rsvps[id] = [...(state.rsvps[id] || []), { uid: u.uid, name: u.displayName || "You", email: u.email || "" }];
+      state.rsvps[ev.id] = (state.rsvps[ev.id] || []).filter((r) => r.uid !== uid);
     } else {
-      await fb.rsvpEvent(id, u);
-      state.rsvps[id] = await fb.listRsvps(id);
+      await fb.deleteRsvp(ev.id, uid);
+      state.rsvps[ev.id] = await fb.listRsvps(ev.id);
     }
-    toast("You're going!", "check");
-    route();
+    toast("Member removed", "check");
+    await refreshEventView(ev.id);
   } catch (e) { toast(e?.message || DB_MSG, "warnDot"); }
 }
+
+async function doRsvp(id) { await openRsvpFor(id); }
 async function doCancelRsvp(id) {
   try {
     if (DEMO) {
@@ -625,7 +991,7 @@ async function doCancelRsvp(id) {
       state.rsvps[id] = await fb.listRsvps(id);
     }
     toast("RSVP cancelled", "check");
-    route();
+    await refreshEventView(id);
   } catch (e) { toast(e?.message || DB_MSG, "warnDot"); }
 }
 async function doDelete(id) {
@@ -642,6 +1008,9 @@ async function doDelete(id) {
 // ── routing / events ────────────────────────────────────────────────────────
 async function route() {
   const seq = ++renderSeq;
+  closeRsvpForm();
+  state.currentEvent = null;
+  state.memberQuery = "";
   // RSVP counts can change in another browser while this page is open; never
   // reuse a cached count across in-app (hash) navigation.
   state.rsvps = {};
@@ -693,15 +1062,28 @@ function onClick(e) {
     if (preview) preview.style.backgroundImage = `url('${coverUrl(key)}')`;
     return;
   }
-  if (a === "rsvp") { doRsvp(el.dataset.id); return; }
+  if (a === "field-add") { addFormField(); return; }
+  if (a === "field-remove") { removeFormField(Number(el.dataset.index)); return; }
+  if (a === "rsvp" || a === "edit-rsvp") { doRsvp(el.dataset.id); return; }
   if (a === "cancel-rsvp") { doCancelRsvp(el.dataset.id); return; }
+  if (a === "members-csv") { exportMembersCsv(); return; }
+  if (a === "member-edit") {
+    const member = (state.members || []).find((r) => r.uid === el.dataset.uid);
+    if (member && state.currentEvent) openRsvpForm(state.currentEvent, member, true);
+    return;
+  }
+  if (a === "member-delete") { deleteMember(el.dataset.uid); return; }
   if (a === "edit") { go(`#/create/${el.dataset.id}`); return; }
   if (a === "delete") { doDelete(el.dataset.id); return; }
 }
 function onInput(e) {
-  if (e.target.id !== "l-search") return;
-  state.discoverQ = e.target.value;
-  refreshDiscover();
+  if (e.target.id === "l-search") {
+    state.discoverQ = e.target.value;
+    refreshDiscover();
+  } else if (e.target.id === "l-member-search") {
+    state.memberQuery = e.target.value;
+    refreshMembersTable();
+  }
 }
 function tickClock() {
   const el = $("#l-clock", mountNode);
