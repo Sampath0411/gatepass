@@ -57,6 +57,12 @@ service cloud.firestore {
         && existsAfter(/databases/$(database)/documents/gp_fests/$(request.resource.data.festId)/events/$(request.resource.data.eventId))
         && getAfter(/databases/$(database)/documents/gp_fests/$(request.resource.data.festId)/events/$(request.resource.data.eventId)).data.gateCode == code
         && isFestOwnerAfter(request.resource.data.festId);
+      // V2 events: the gate is written in the same batch as its event, so both
+      // the owner check and the gate-code binding come from the after-state.
+      allow create: if signedIn()
+        && existsAfter(/databases/$(database)/documents/gp_events_v2/$(request.resource.data.eventId))
+        && getAfter(/databases/$(database)/documents/gp_events_v2/$(request.resource.data.eventId)).data.gateCode == code
+        && getAfter(/databases/$(database)/documents/gp_events_v2/$(request.resource.data.eventId)).data.ownerId == request.auth.uid;
       allow delete: if isOwner(resource.data.eventId)
         || (resource.data.festId is string && isFestOwner(resource.data.festId));
       allow update: if isOwner(resource.data.eventId)
@@ -64,6 +70,20 @@ service cloud.firestore {
             && request.resource.data.diff(resource.data).affectedKeys()
                  .hasOnly(['checked', 'bounced', 'recent']))
         || (resource.data.festId is string && isFestOwner(resource.data.festId));
+      // Second grants for v2 events. isOwner() cannot be used here: the v2
+      // gate's eventId points at gp_events_v2, not gp_events.
+      allow delete: if isOwnerEventV2(resource.data.eventId)
+        && get(/databases/$(database)/documents/gp_events_v2/$(resource.data.eventId)).data.gateCode == code;
+      allow update: if isOwnerEventV2(request.resource.data.eventId)
+        && get(/databases/$(database)/documents/gp_events_v2/$(request.resource.data.eventId)).data.gateCode == code;
+      // A member issuing their own pass on a non-approval event increments the
+      // gate total in the batch that creates their own approved RSVP. Tightly
+      // scoped to a single 'total' mutation plus an approved own RSVP.
+      allow update: if signedIn()
+        && get(/databases/$(database)/documents/gp_events_v2/$(resource.data.eventId)).data.gateCode == code
+        && get(/databases/$(database)/documents/gp_events_v2/$(resource.data.eventId)).data.get('approval', false) == false
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['total'])
+        && getAfter(/databases/$(database)/documents/gp_rsvps/$(resource.data.eventId)/rsvps/$(request.auth.uid)).data.status == 'approved';
     }
 
     match /gp_gates/{code}/roster/{passId} {
@@ -77,6 +97,17 @@ service cloud.firestore {
         get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId)
         || (signedIn() && get(/databases/$(database)/documents/gp_reg_public/$(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId)).data.gateCode == code);
       allow delete: if isOwner(
+        get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
+      // Second grants for v2 gates: eventId resolves to a gp_events_v2 doc,
+      // so isOwner() (which looks up gp_events) cannot be used.
+      allow create: if isOwnerEventV2(
+        get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
+      // A member issuing their own pass creates only their own roster row.
+      allow create: if signedIn()
+        && passId == request.auth.uid
+        && get(/databases/$(database)/documents/gp_events_v2/$(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId)).data.gateCode == code
+        && get(/databases/$(database)/documents/gp_events_v2/$(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId)).data.get('approval', false) == false;
+      allow delete: if isOwnerEventV2(
         get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
       // Owner-only update. The scan transaction no longer writes the roster
       // stamp: checked-in state is derived from the one-shot claim doc instead.
@@ -92,6 +123,11 @@ service cloud.firestore {
       // Phase A: a signed-in student creates their own public pass doc during
       // registration. Firestore ORs the two create grants.
       allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['id','festId','eventId','event','name','checkedInAt','gate']);
+      // V2 owner issuing a pass on approval. The signed-in grant above still
+      // covers a member issuing their own pass on a non-approval event.
+      allow create: if signedIn()
+        && isOwnerEventV2(request.resource.data.eventId)
         && request.resource.data.keys().hasOnly(['id','festId','eventId','event','name','checkedInAt','gate']);
       // SECURITY (21 Nov 2026): owner-only update. The old rule let any
       // token-holder flip checkedInAt/gate on their own pass, faking a
@@ -184,7 +220,10 @@ service cloud.firestore {
     }
 
     match /gp_events_v2/{eventId} {
-      allow get: if resource.data.visibility == 'public' || isOwnerEventV2(eventId);
+      // Link-only private events: the long unguessable URL is the capability,
+      // so any signed-in user with the link can open the event. List queries
+      // stay public-only (owners use the createdEvents index below).
+      allow get: if resource.data.visibility == 'public' || signedIn();
       // Rules are NOT filters: public list queries must carry
       // where("visibility","==","public"). Owner lists use the
       // gp_users/{uid}/createdEvents index below instead of querying this path.
@@ -202,7 +241,10 @@ service cloud.firestore {
     // plan's gp_rsvps/{eventId}/{uid} is not a valid doc path. Use the rsvps
     // subcollection level; {uid} remains the RSVP doc id.
     match /gp_rsvps/{eventId}/rsvps/{uid} {
+      // A link-holder is signed in, so link-only private events' RSVPs are
+      // readable by any signed-in user; public events stay readable by all.
       allow read: if get(/databases/$(database)/documents/gp_events_v2/$(eventId)).data.visibility == 'public'
+        || signedIn()
         || isOwnerEventV2(eventId);
       // Only the member themselves may create an RSVP. Once created, either the
       // event owner (member directory edits) or the member (own details) may

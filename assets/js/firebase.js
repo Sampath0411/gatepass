@@ -693,17 +693,56 @@ function v2Event(s) {
     description: d.description || "", price: d.price || "Free",
     approval: !!d.approval, capacity: d.capacity || 0,
     visibility: d.visibility === "private" ? "private" : "public",
+    gate_code: d.gateCode || "",
     createdAt: stamp(d.createdAt),
     formFields: d.formFields || DEFAULT_FORM_FIELDS,
   };
+}
+
+// One gate code per v2 event, usable by the existing /gate/ scanner. Writes
+// the public pass, the gate roster row and the gate counter into the caller's
+// batch so issuing a pass is atomic with the RSVP state change. Returns the
+// token so the caller can store it on the RSVP (via rsvpRef) if supplied.
+function issuePassBatch(batch, event, uid, answers, rsvpRef) {
+  const token = newToken();
+  const name = answers.name || "";
+  const contact = answers.email || answers.phone || "";
+  // Never persist the gate code inside the publicly readable pass document.
+  const publicEvent = {
+    name: event.title || event.name || "",
+    title: event.title || event.name || "",
+    cover: event.cover || "crowd",
+    art: 0,
+    starts_at: stamp(event.startsAt),
+    ends_at: stamp(event.endsAt),
+    location: event.location || "",
+    venue: event.location || "",
+    description: event.description || "",
+    price: event.price || "Free",
+  };
+  batch.set(doc(db, PASS_PUB, token), {
+    id: uid, eventId: event.id, event: publicEvent,
+    name, checkedInAt: null, gate: "",
+  });
+  if (event.gateCode) {
+    batch.set(doc(db, GATES, event.gateCode, "roster", uid), {
+      name, nameLower: name.toLowerCase(), hint: mask(contact), token,
+      checkedInAt: null, gate: "",
+    });
+    batch.update(doc(db, GATES, event.gateCode), { total: increment(1) });
+  }
+  if (rsvpRef) batch.update(rsvpRef, { passId: uid, passToken: token });
+  return token;
 }
 
 export async function createV2Event(row) {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error("Sign in required");
   const id = doc(collection(db, V2)).id;
+  const code = newCode();
   const event = {
     ownerId: uid,
+    gateCode: code,
     title: row.title || row.name || "",
     cover: row.cover || row.art || "crowd",
     startsAt: toTime(row.startsAt ?? row.starts_at),
@@ -723,6 +762,18 @@ export async function createV2Event(row) {
   // Owner index: the only supported way for an owner to list their private events.
   batch.set(doc(db, "gp_users", uid, CREATED, id), {
     title: event.title, startsAt: event.startsAt, visibility: event.visibility,
+  });
+  // The gate code is a capability: the gate staff only need this doc, never
+  // the (possibly private) event. Created in the same batch as the event so
+  // the rules can bind code -> event via getAfter().
+  batch.set(doc(db, GATES, code), {
+    eventId: id,
+    name: event.title,
+    club: "",
+    venue: event.location,
+    art: 0,
+    startsAt: event.startsAt,
+    total: 0, checked: 0, bounced: 0, recent: [],
   });
   await batch.commit();
   return id;
@@ -788,16 +839,62 @@ export async function rsvpEvent(eventId, user, answers = {}) {
   const u = user || auth.currentUser;
   const uid = u?.uid;
   if (!uid) throw new Error("Sign in required");
-  await setDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid), {
+  const snap = await getDoc(doc(db, V2, eventId));
+  const event = snap.exists() ? { id: eventId, ...snap.data() } : null;
+  // Approval events wait for the host; everything else issues the pass now.
+  // A missing event doc is treated as non-approval for backwards compatibility.
+  const approved = !event?.approval;
+  const rsvpRef = doc(db, RSVPS, eventId, RSVP_SUB, uid);
+  const batch = writeBatch(db);
+  batch.set(rsvpRef, {
     name: answers.name ?? u.displayName ?? "",
     email: answers.email ?? u.email ?? "",
     phone: answers.phone ?? "",
     college: answers.college ?? "",
     answers,
+    status: approved ? "approved" : "pending",
     at: serverTimestamp(),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
+  if (approved) issuePassBatch(batch, event || { id: eventId }, uid, answers, rsvpRef);
+  await batch.commit();
+}
+
+export async function approveMember(eventId, uid) {
+  const by = auth.currentUser?.uid;
+  if (!by) throw new Error("Sign in required");
+  const [rsvp, event] = await Promise.all([
+    getDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid)),
+    getDoc(doc(db, V2, eventId)),
+  ]);
+  if (!rsvp.exists() || !event.exists()) throw new Error("RSVP or event not found");
+  const rsvpRef = doc(db, RSVPS, eventId, RSVP_SUB, uid);
+  const batch = writeBatch(db);
+  batch.update(rsvpRef, {
+    status: "approved", reviewedAt: serverTimestamp(), reviewedBy: by,
+  });
+  issuePassBatch(batch, { id: eventId, ...event.data() }, uid, rsvp.data().answers || {}, rsvpRef);
+  await batch.commit();
+}
+
+export async function rejectMember(eventId, uid) {
+  const by = auth.currentUser?.uid;
+  if (!by) throw new Error("Sign in required");
+  await updateDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid), {
+    status: "rejected", reviewedAt: serverTimestamp(), reviewedBy: by,
+  });
+}
+
+// The member's own RSVP is the single source of truth for their approval
+// state and pass token (never expose passToken in the owner's member list).
+export async function requestPass(eventId) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error("Sign in required");
+  const s = await getDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid));
+  if (!s.exists()) return { status: null, passToken: null };
+  const r = s.data();
+  return { status: r.status || "approved", passToken: r.passToken || null };
 }
 
 export async function updateRsvp(eventId, uid, answers = {}) {
@@ -830,6 +927,7 @@ export async function listRsvps(eventId) {
       name: r.name || "", email: r.email || "",
       phone: r.phone || "", college: r.college || "",
       answers: r.answers || {},
+      status: r.status || "approved",
       at: stamp(r.at),
       created_at: stamp(r.createdAt),
       updated_at: stamp(r.updatedAt),
