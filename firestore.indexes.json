@@ -6,6 +6,14 @@
       "fields": [
         { "fieldPath": "nameLower", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "gp_events_v2",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "visibility", "order": "ASCENDING" },
+        { "fieldPath": "startsAt", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []
