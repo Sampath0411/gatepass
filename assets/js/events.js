@@ -350,7 +350,7 @@ function discoverResults() {
 function refreshDiscover() {
   const box = $("#l-discover-results", mountNode);
   if (box) box.innerHTML = discoverResults();
-  document.querySelectorAll(".l-chip", mountNode).forEach((c) =>
+  mountNode.querySelectorAll(".l-chip").forEach((c) =>
     c.classList.toggle("is-active", c.dataset.key === state.discoverKey));
 }
 async function renderDiscover(seq) {
@@ -497,6 +497,7 @@ async function onSubmit(e) {
   const form = e.target;
   if (form.id !== "l-create-form") return;
   e.preventDefault();
+  if (DEMO) { toast("Demo mode — changes aren't saved"); return; }
   const f = form.elements;
   const err = $("#l-error", form);
   err.hidden = true;
@@ -628,6 +629,7 @@ async function doCancelRsvp(id) {
   } catch (e) { toast(e?.message || DB_MSG, "warnDot"); }
 }
 async function doDelete(id) {
+  if (DEMO) { toast("Demo mode — nothing was deleted"); return; }
   if (!window.confirm("Delete this event? This can't be undone.")) return;
   try {
     await fb.deleteV2Event(id);
@@ -644,7 +646,7 @@ async function route() {
   const r = currentRoute();
   const wide = r === "create" || r === "event" ? " l-main-wide" : "";
   mountNode.className = "luma-root";
-  mountNode.innerHTML = `${navHTML()}<main class="l-main${wide}" id="l-view">${skeleton()}</main>`;
+  mountNode.innerHTML = `${navHTML()}<main class="l-main${wide}" id="l-view" aria-live="polite">${skeleton()}</main>`;
   if (r === "calendar") return renderCalendar(seq);
   if (r === "discover") return renderDiscover(seq);
   if (r === "create") return renderCreate(h.startsWith("create/") ? h.slice(7) : null, seq);
