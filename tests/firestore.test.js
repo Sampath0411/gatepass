@@ -428,7 +428,7 @@ test("38. the fest owner can read a sub-event; another user cannot", async () =>
 // update one. These tests seed with rules disabled (emulator admin) so each
 // case starts from one consistent public + private event graph.
 const V2_PUBLIC = "v2-public", V2_PRIVATE = "v2-private";
-const V2_NEW = "v2-new", V2_NEW_OTHER = "v2-new-other";
+const V2_NEW = "v2-new", V2_NEW_OTHER = "v2-new-other", V2_FIELDS = "v2-fields";
 const RSVPER = "rsvper-uid", FRESH_RSVP = "fresh-rsvp-uid";
 
 const seedV2 = () => env.withSecurityRulesDisabled(async (ctx) => {
@@ -516,23 +516,35 @@ test("42. an attendee can create only their own RSVP", async () => {
   }));
 });
 
-test("43. RSVP update is denied even to the attendee and the event owner", async () => {
-  await seedV2();
-  await assertFails(as(OTHER).doc(`gp_rsvps/${V2_PUBLIC}/rsvps/${OTHER}`).update({ name: "Renamed" }));
-  await assertFails(as(RSVPER).doc(`gp_rsvps/${V2_PUBLIC}/rsvps/${RSVPER}`).update({ name: "Renamed" }));
-  await assertFails(as(OWNER).doc(`gp_rsvps/${V2_PUBLIC}/rsvps/${OTHER}`).update({ name: "Renamed" }));
-  await assertFails(as(null).doc(`gp_rsvps/${V2_PUBLIC}/rsvps/${OTHER}`).update({ name: "Renamed" }));
-});
-
-test("44. RSVP delete is own-only; owner cannot delete an attendee's RSVP", async () => {
+test("43. RSVP update: owner edits any member, member edits own, others and anon denied", async () => {
   await seedV2();
   const rsvp = (uid) => `gp_rsvps/${V2_PUBLIC}/rsvps/${uid}`;
+  // A signed-in non-owner cannot edit somebody else's RSVP; anon cannot edit at all.
+  await assertFails(as(OTHER).doc(rsvp(RSVPER)).update({ name: "Hacked" }));
+  await assertFails(as(RSVPER).doc(rsvp(OTHER)).update({ name: "Hacked" }));
+  await assertFails(as(null).doc(rsvp(OTHER)).update({ name: "Hacked" }));
+  // The event owner can update any member's details from the member directory.
+  await assertSucceeds(as(OWNER).doc(rsvp(OTHER)).update({ name: "Renamed by owner", phone: "9876543210" }));
+  await assertSucceeds(as(OWNER).doc(rsvp(RSVPER)).update({ college: "Edited by owner" }));
+  // A member can update their own details ("Edit my details").
+  await assertSucceeds(as(RSVPER).doc(rsvp(RSVPER)).update({ name: "Renamed by member" }));
+  await assertSucceeds(as(OTHER).doc(rsvp(OTHER)).update({ name: "Renamed by member" }));
+});
+
+test("44. RSVP delete: owner removes any member, member cancels own, others and anon denied", async () => {
+  await seedV2();
+  const rsvp = (uid) => `gp_rsvps/${V2_PUBLIC}/rsvps/${uid}`;
+  // A signed-in non-owner cannot delete somebody else's RSVP; anon cannot delete at all.
   await assertFails(as(OTHER).doc(rsvp(RSVPER)).delete());
-  await assertFails(as(OWNER).doc(rsvp(RSVPER)).delete());   // event owner is not the RSVP owner
-  await assertFails(as(null).doc(rsvp(RSVPER)).delete());
+  await assertFails(as(RSVPER).doc(rsvp(OTHER)).delete());
+  await assertFails(as(null).doc(rsvp(OTHER)).delete());
+  // The event owner can delete any member's RSVP from the member directory.
+  await assertSucceeds(as(OWNER).doc(rsvp(OTHER)).delete());
+  await assertSucceeds(as(OWNER).doc(rsvp(RSVPER)).delete());
+  // A member can still cancel their own RSVP. Re-seed so both docs exist again.
+  await seedV2();
   await assertSucceeds(as(RSVPER).doc(rsvp(RSVPER)).delete());
   await assertSucceeds(as(OTHER).doc(rsvp(OTHER)).delete());
-  await assertFails(as(OWNER).doc(rsvp(OTHER)).delete());
 });
 
 test("45. an owner-scoped index write is allowed only under the caller's own uid", async () => {
@@ -545,5 +557,46 @@ test("45. an owner-scoped index write is allowed only under the caller's own uid
   }));
   await assertFails(as(null).doc(`gp_users/${OWNER}/createdEvents/v2-index-anon`).set({
     title: "Anon", startsAt: new Date(), visibility: "private",
+  }));
+});
+
+test("46. configurable fields: event carries formFields and member answers are stored and editable", async () => {
+  await seedV2();
+  const formFields = [
+    { key: "name", label: "Full name", type: "text", required: true, enabled: true },
+    { key: "email", label: "Email", type: "email", required: true, enabled: true },
+    { key: "phone", label: "Phone number", type: "tel", required: false, enabled: true },
+    { key: "college", label: "College", type: "text", required: false, enabled: true },
+    { key: "year", label: "Year of study", type: "text", required: false, enabled: true },
+  ];
+  // The owner stores the configured field list on the event.
+  await assertSucceeds(as(OWNER).doc(`gp_events_v2/${V2_FIELDS}`).set({
+    ...v2row(OWNER), title: "Fields Event", formFields,
+  }));
+  const event = await as(null).doc(`gp_events_v2/${V2_FIELDS}`).get();
+  assert.deepEqual(event.data().formFields, formFields);
+
+  // A member creates only their own RSVP, carrying answers for the configured fields.
+  const answers = { name: "Lin", email: "lin@x.com", phone: "9876543210", college: "Test College", year: "3rd" };
+  const path = `gp_rsvps/${V2_FIELDS}/rsvps/${FRESH_RSVP}`;
+  await assertSucceeds(as(FRESH_RSVP).doc(path).set({ uid: FRESH_RSVP, ...answers, answers, at: new Date() }));
+  await assertFails(as(OTHER).doc(path).set({ uid: FRESH_RSVP, ...answers, answers, at: new Date() }));
+  const stored = await as(OWNER).doc(path).get();
+  assert.equal(stored.data().answers.year, "3rd");
+  assert.equal(stored.data().college, "Test College");
+  assert.equal(stored.data().phone, "9876543210");
+
+  // Owner edits the member's answers from the directory; the member edits their own.
+  await assertSucceeds(as(OWNER).doc(path).update({
+    answers: { ...answers, phone: "1112223333" }, phone: "1112223333",
+  }));
+  const edited = await as(OWNER).doc(path).get();
+  assert.equal(edited.data().answers.phone, "1112223333");
+  await assertSucceeds(as(FRESH_RSVP).doc(path).update({
+    answers: { ...answers, college: "Another College" }, college: "Another College",
+  }));
+  // Create remains own-only even for an event with custom fields.
+  await assertFails(as(null).doc(`gp_rsvps/${V2_FIELDS}/rsvps/anon`).set({
+    uid: "anon", ...answers, answers, at: new Date(),
   }));
 });

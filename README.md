@@ -22,10 +22,11 @@ The homepage at `/` is now a Luma-inspired event browser. No account is needed t
 - **Events** — the feed of public events, newest first. Each card shows a cover, date badge, location, ticket price and a "N going" count (with attendee initials).
 - **Calendars** — a month grid with dots and labels on days that have events. Click a day to filter the list below, or use the arrows to change month.
 - **Discover** — search across event names, places, descriptions and cover themes, plus category chips for a one-tap filter.
-- **Create Event** — pick one of six covers, then set the name, start/end date and time, timezone, location, description, ticket price, approval, capacity and visibility (public or private). The host sees **Edit event** and **Delete event** on their own event pages; editing reopens the same form with the details filled in.
-- **Event detail + RSVP** — open a card for the full description, date, venue and attendee count. Signed-in guests can **RSVP** or **Cancel RSVP**; private events stay visible only to their host.
+- **Create Event** — pick one of six covers, then set the name, start/end date and time, timezone, location, description, ticket price, approval, capacity and visibility (public or private). Under **Registration fields** you decide what guests fill in when they RSVP: the four presets (full name, email, phone number, college) can be unticked, relabelled or marked required, and you can add your own custom fields. The host sees **Edit event** and **Delete event** on their own event pages; editing reopens the same form with the details filled in.
+- **Event detail + RSVP** — open a card for the full description, date, venue and attendee count. **RSVP** opens a form that collects the event's configured fields (name and email are prefilled from Google sign-in); afterwards a guest sees **Edit my details** and **Cancel RSVP**. Private events stay visible only to their host.
+- **Member directory** — on their own event page the host gets a **Members (N)** table with a row per guest, columns for every enabled registration field plus Joined, a search box, **Export CSV**, and per-row **Edit**/**Remove** buttons. The host can update any guest's details; a guest can update only their own.
 
-Events live in `gp_events_v2` and RSVPs in `gp_rsvps/{eventId}/rsvps/{uid}`. Firestore Security Rules make public events and their RSVPs readable by anyone, keep private events owner-only, and let only the signed-in attendee create or delete their own RSVP (RSVP updates are denied). Adding `?demo=1` to the homepage fills it with sample cards for UI preview — demo mode never writes to Firestore.
+Events live in `gp_events_v2` and RSVPs in `gp_rsvps/{eventId}/rsvps/{uid}`. Each RSVP stores the guest's answers under `answers` (plus flat name/email/phone/college columns for the presets), and the event doc carries its own `formFields` list; older events fall back to the four default presets. Firestore Security Rules make public events and their RSVPs readable by anyone and keep private events owner-only. Only the signed-in member can **create** an RSVP (under their own uid); after that, either the event owner or that member can **update** or **delete** it. Adding `?demo=1` to the homepage fills it with sample cards for UI preview — demo mode never writes to Firestore.
 
 **The legacy routes still work:** `/gate/` (the scanner), `/p/#<token>` (a pass) and `/register/#/register/<eventId>` (fest registration) are unchanged and keep their own riso-poster styling. The original organiser dashboard module is still in the repo; the root `/` now serves the events homepage instead.
 
@@ -110,7 +111,7 @@ For fest registration and direct Sheet appends you also need a Google **OAuth cl
 
 ## What's stored
 
-Event details, each attendee's name and the one contact column you choose (email or phone), and every scan (time, gate name, a random device id). Fest registrations also store the student's uid, email/phone and pass link under the fest, owner-only. Deleting an event deletes its event data. Attendees' pass pages show only their name, the event and whether the pass was used.
+Event details, each attendee's name and the one contact column you choose (email or phone), and every scan (time, gate name, a random device id). Luma-style events also store the registration fields you configured and each guest's RSVP answers under that event, owner-only. Fest registrations store the student's uid, email/phone and pass link under the fest, owner-only. Deleting an event deletes its event data. Attendees' pass pages show only their name, the event and whether the pass was used.
 
 ## Files
 

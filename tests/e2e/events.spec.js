@@ -1,7 +1,9 @@
 /**
  * End-to-end proof of the Luma-style events homepage: sign in → create an event
- * in the UI → it appears in the feed, calendar and discover → an attendee RSVPs
- * → the count is 1 → the owner edits the title → the feed shows the new title.
+ * with configurable registration fields → it appears in the feed, calendar and
+ * discover → an attendee RSVPs through the details modal → the count is 1 → the
+ * organiser member table/CSV show the answers and the owner can edit a member
+ * → the owner edits the title → the feed shows the new title.
  *
  * Like the other E2E specs, everything is overridden from this file: it starts
  * its own Firestore emulator (port 8083, so it can run alongside the 8080/8081/
@@ -35,6 +37,7 @@ const HOST = "127.0.0.1";
 const PROJECT = "demo-gatepass-events";
 const OWNER = "e2e-events-owner", ATTENDEE = "e2e-events-attendee";
 const TITLE = "E2E Luma Night", NEW_TITLE = "E2E Luma Night — Updated";
+const PHONE = "9876543210", COLLEGE = "Test College", NEW_PHONE = "1112223333";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -232,7 +235,7 @@ test.describe("Luma events homepage", () => {
     if (tempConfigDir) rmSync(tempConfigDir, { recursive: true, force: true });
   });
 
-  test("create → feed/calendar/discover → RSVP → count 1 → owner edits title → feed updates", async ({ browser }) => {
+  test("create → feed/calendar/discover → RSVP with details → members/CSV/edit → title edit → feed updates", async ({ browser }) => {
     // ── 1. owner signs in (stubbed Auth) and creates an event through the UI ──
     const owner = await makeContext(browser, OWNER);
     const ownerPage = await owner.newPage();
@@ -267,13 +270,28 @@ test.describe("Luma events homepage", () => {
     await expect(ownerPage.locator("#l-discover-results .l-card-title")).toHaveCount(1);
     await expect(ownerPage.locator("#l-discover-results .l-card-title")).toHaveText(TITLE);
 
-    // ── 3. an attendee RSVPs; the count becomes 1 ──
+    // ── 3. an attendee RSVPs via the details modal; the count becomes 1 ──
     const attendee = await makeContext(browser, ATTENDEE);
     const attendeePage = await attendee.newPage();
     await attendeePage.goto(`/#/event/${id}`);
     await expect(attendeePage.locator(".l-detail-title")).toHaveText(TITLE);
     await expect(attendeePage.locator(".l-rsvp-top strong")).toHaveText("0 going");
+
+    // RSVP is no longer one-click: a modal collects the configured fields.
     await attendeePage.locator('[data-action="rsvp"]').click();
+    const rsvpForm = attendeePage.locator("#l-rsvp-form");
+    await expect(rsvpForm).toBeVisible();
+    await expect(attendeePage.locator(".l-modal-title")).toHaveText(TITLE);
+    // Name and email are prefilled from the signed-in Google user.
+    await expect(attendeePage.locator("#l-rsvp-name")).toHaveValue(ATTENDEE);
+    await expect(attendeePage.locator("#l-rsvp-email")).toHaveValue(`${ATTENDEE}@example.com`);
+    // Phone and college are enabled but unfilled; the guest must enter them.
+    await expect(attendeePage.locator("#l-rsvp-phone")).toHaveValue("");
+    await expect(attendeePage.locator("#l-rsvp-college")).toHaveValue("");
+    await attendeePage.locator("#l-rsvp-phone").fill(PHONE);
+    await attendeePage.locator("#l-rsvp-college").fill(COLLEGE);
+    await rsvpForm.locator('[type="submit"]').click();
+    await expect(rsvpForm).toHaveCount(0);
     await expect(attendeePage.locator(".l-rsvp-top strong")).toHaveText("1 going");
     await expect(attendeePage.locator('[data-action="cancel-rsvp"]')).toBeVisible();
 
@@ -282,6 +300,42 @@ test.describe("Luma events homepage", () => {
     // show the count from before the attendee RSVP'd.)
     await ownerPage.goto(`/?fresh=owner-count#/event/${id}`);
     await expect(ownerPage.locator(".l-rsvp-top strong")).toHaveText("1 going");
+
+    // ── 3b. organiser member directory: count, table, CSV and edit ──
+    const members = ownerPage.locator("#l-members");
+    await expect(members).toBeVisible();
+    await expect(ownerPage.locator(".l-members-title")).toHaveText("Members (1)");
+    const head = ownerPage.locator(".l-member-table thead th");
+    await expect(head).toHaveText(["Full name", "Email", "Phone number", "College", "Joined", "Actions"]);
+    const row = ownerPage.locator("#l-member-rows tr");
+    await expect(row).toHaveCount(1);
+    await expect(row).toContainText(ATTENDEE);
+    await expect(row).toContainText(`${ATTENDEE}@example.com`);
+    await expect(row).toContainText(PHONE);
+    await expect(row).toContainText(COLLEGE);
+
+    // CSV export carries every configured answer, not just the count.
+    const [download] = await Promise.all([
+      ownerPage.waitForEvent("download"),
+      ownerPage.locator('[data-action="members-csv"]').click(),
+    ]);
+    const csv = readFileSync(await download.path(), "utf8");
+    expect(csv).toContain("Full name,Email,Phone number,College,Joined");
+    expect(csv).toContain(ATTENDEE);
+    expect(csv).toContain(`${ATTENDEE}@example.com`);
+    expect(csv).toContain(PHONE);
+    expect(csv).toContain(COLLEGE);
+
+    // The owner edits a member's details via the modal; the table updates.
+    await ownerPage.locator('[data-action="member-edit"]').first().click();
+    const memberForm = ownerPage.locator("#l-rsvp-form");
+    await expect(memberForm).toBeVisible();
+    await expect(ownerPage.locator(".l-modal-title")).toHaveText("Edit member");
+    await expect(ownerPage.locator("#l-rsvp-phone")).toHaveValue(PHONE);
+    await ownerPage.locator("#l-rsvp-phone").fill(NEW_PHONE);
+    await memberForm.locator('[type="submit"]').click();
+    await expect(memberForm).toHaveCount(0);
+    await expect(ownerPage.locator("#l-member-rows tr")).toContainText(NEW_PHONE);
 
     // ── 4. owner edits the title; the feed reflects the change ──
     await ownerPage.locator('[data-action="edit"]').click();
@@ -296,14 +350,24 @@ test.describe("Luma events homepage", () => {
     await expect(ownerPage.locator(".l-card-title")).toHaveText(NEW_TITLE);
     await expect(ownerPage.locator(".l-card-title")).not.toHaveText(TITLE);
 
-    // ── 5. Firestore holds exactly the expected event + one own-only RSVP ──
+    // ── 5. Firestore holds the event (with fields) + one RSVP with answers ──
     const data = await readEventData(id);
     expect(data.event.ownerId).toBe(OWNER);
     expect(data.event.title).toBe(NEW_TITLE);
     expect(data.event.visibility).toBe("public");
+    expect(data.event.formFields.map((f) => f.key)).toEqual(["name", "email", "phone", "college"]);
     expect(data.rsvps).toHaveLength(1);
+    // The RSVP doc ID is the attendee uid (the data layer no longer stores a
+    // redundant `uid` field); listRsvps() maps it into the member rows too.
     expect(data.rsvps[0].id).toBe(ATTENDEE);
-    expect(data.rsvps[0].uid).toBe(ATTENDEE);
+    expect(data.rsvps[0].answers).toEqual({
+      name: ATTENDEE,
+      email: `${ATTENDEE}@example.com`,
+      phone: NEW_PHONE,
+      college: COLLEGE,
+    });
+    expect(data.rsvps[0].phone).toBe(NEW_PHONE);
+    expect(data.rsvps[0].college).toBe(COLLEGE);
 
     await attendee.close();
     await owner.close();
