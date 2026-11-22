@@ -50,6 +50,14 @@ afterEach(async () => env.clearFirestore());
 after(async () => { await env.clearFirestore(); await env.cleanup(); });
 
 const as = (uid) => (uid ? env.authenticatedContext(uid) : env.unauthenticatedContext()).firestore();
+// Several read grants do not depend on the doc existing (e.g. `allow get: if
+// true` for public passes), so a deleted doc is verified by exists === false
+// rather than by expecting the read itself to be denied.
+const missing = async (db, path) => {
+  const snap = await assertSucceeds(db.doc(path).get());
+  assert.equal(typeof snap.exists === "function" ? snap.exists() : snap.exists, false,
+    `${path} should have been deleted`);
+};
 const claim = () => ({
   eventId: EVENT, token: TOKEN, name: "Ada", gate: "Gate 1", device: "dev",
   scannedAt: serverTimestamp(),
@@ -315,6 +323,29 @@ const registrationBatch = (db, { uid = STUDENT, passId = "reg-pass-1", token = "
   return batch;
 };
 
+// A public fest pass plus the registration doc that authorises it, written in
+// one batch (mirrors registerStudentWithCode() after 21 Nov 2026). regToken can
+// be overridden to probe a pass/registration binding mismatch.
+const publicPassBatch = (db, {
+  token = "P".repeat(32), regToken = token, uid = STUDENT, regId = "reg-public-1",
+  passId = "pub-pass-1", festId = FEST, eventId = SUBEVENT, gateCode,
+} = {}) => {
+  const pass = {
+    id: passId, festId, eventId,
+    event: { name: "Tech Talk", club: "Test Club", starts_at: "2026-11-22T10:00:00.000Z", venue: "Main Hall", art: 0 },
+    name: "Grace Hopper", checkedInAt: null, gate: "", registrationId: regId,
+  };
+  if (gateCode !== undefined) pass.gateCode = gateCode; // smuggling probe
+  const batch = writeBatch(db);
+  batch.set(db.doc(`gp_passes/${token}`), pass);
+  batch.set(db.doc(`gp_fests/${festId}/registrations/${regId}`), {
+    festId, eventId, eventName: "Tech Talk", uid, passId, token: regToken,
+    name: "Grace Hopper", email: "grace@example.com", phone: "",
+    createdAt: serverTimestamp(), sheetSynced: false,
+  });
+  return batch;
+};
+
 test("30. registration descriptor: signed-in get, anonymous denied, list denied", async () => {
   await seedPhaseA();
   await assertSucceeds(as(STUDENT).doc(`gp_reg_public/${SUBEVENT}`).get());
@@ -356,20 +387,39 @@ test("34. registration on a closed event is denied", async () => {
   await assertFails(registrationBatch(as(STUDENT)).commit());
 });
 
-test("35. the public pass doc never carries the gate code", async () => {
+test("35. fest public pass needs a same-batch registrationId owned by the caller and never carries the gate code", async () => {
   await seedPhaseA();
   const token = "P".repeat(32);
-  const pass = {
-    id: "pub-pass-1", festId: FEST, eventId: SUBEVENT,
-    event: { name: "Tech Talk", club: "Test Club", starts_at: "2026-11-22T10:00:00.000Z", venue: "Main Hall", art: 0 },
-    name: "Grace Hopper", checkedInAt: null, gate: "",
-  };
-  // The student create grant uses hasOnly(), so a gateCode field is refused.
-  await assertFails(as(STUDENT).doc(`gp_passes/${token}`).set({ ...pass, gateCode: FEST_CODE }));
-  await assertSucceeds(as(STUDENT).doc(`gp_passes/${token}`).set(pass));
+  // Happy path: the public pass and its authorising registration are written
+  // together by the student; getAfter() sees the registration in this batch.
+  await assertSucceeds(publicPassBatch(as(STUDENT), { token }).commit());
   const pub = await as(null).doc(`gp_passes/${token}`).get();
+  assert.equal(pub.data().registrationId, "reg-public-1");
   assert.equal(pub.data().gateCode, undefined);
   assert.equal(pub.data().event.gateCode, undefined);
+
+  const bare = {
+    id: "pub-pass-bare", festId: FEST, eventId: SUBEVENT,
+    event: { name: "Tech Talk" }, name: "Grace Hopper", checkedInAt: null, gate: "",
+  };
+  // No registrationId at all: the pass create grant requires one.
+  await assertFails(as(STUDENT).doc(`gp_passes/${"Q".repeat(32)}`).set(bare));
+  // A registrationId with no registration doc in the batch is a forgery.
+  await assertFails(as(STUDENT).doc(`gp_passes/${"R".repeat(32)}`).set({
+    ...bare, registrationId: "reg-does-not-exist",
+  }));
+  // A registration owned by somebody else cannot authorise the caller's pass.
+  await assertFails(publicPassBatch(as(STUDENT), {
+    token: "S".repeat(32), uid: OTHER, regId: "reg-forged",
+  }).commit());
+  // Neither can a registration that names a different token.
+  await assertFails(publicPassBatch(as(STUDENT), {
+    token: "T".repeat(32), regToken: "Z".repeat(32), regId: "reg-mismatch",
+  }).commit());
+  // The public pass still never carries the gate code (hasOnly on create).
+  await assertFails(publicPassBatch(as(STUDENT), {
+    token: "U".repeat(32), regId: "reg-code", gateCode: FEST_CODE,
+  }).commit());
 });
 
 test("36. roster create by a student: matching descriptor code allowed, wrong code denied", async () => {
@@ -446,9 +496,12 @@ const seedV2 = () => env.withSecurityRulesDisabled(async (ctx) => {
   await db.doc(`gp_users/${OWNER}/createdEvents/${V2_PUBLIC}`).set({ title: "Public V2 Event", startsAt, visibility: "public" });
   await db.doc(`gp_users/${OWNER}/createdEvents/${V2_PRIVATE}`).set({ title: "Private V2 Event", startsAt, visibility: "private" });
   // Seeded RSVPs (one per event) give read/update/delete tests a live doc.
+  // The name-only public projection is seeded alongside them: attendee counts
+  // and avatars read this instead of the now owner-or-self-only RSVPs.
   for (const eventId of [V2_PUBLIC, V2_PRIVATE]) {
     for (const uid of [OTHER, RSVPER]) {
       await db.doc(`gp_rsvps/${eventId}/rsvps/${uid}`).set({ uid, name: "Ada", email: "ada@x.com", at: startsAt });
+      await db.doc(`gp_members_public/${eventId}/m/${uid}`).set({ name: "Ada" });
     }
   }
 });
@@ -473,7 +526,7 @@ test("39. public v2 event: get is open to all; list needs the visibility filter;
   await assertFails(as(OTHER).collection(`gp_users/${OWNER}/createdEvents`).get());
 });
 
-test("40. private v2 event: signed-in link visitor gets it and its RSVPs; anonymous cannot; lists stay public-only", async () => {
+test("40. RSVPs are owner-or-self only; public attendee names come from gp_members_public", async () => {
   await seedV2();
   // The long event URL is the capability: any signed-in link-holder may GET a
   // private event, even though they never see it in a feed. Anonymous cannot.
@@ -491,17 +544,39 @@ test("40. private v2 event: signed-in link visitor gets it and its RSVPs; anonym
   assert.equal(linkList.size, 1);
   assert.equal(linkList.docs[0].id, V2_PUBLIC);
   await assertFails(as(OTHER).collection("gp_events_v2").get()); // bare list hits the private doc
-  // RSVP reads: a signed-in link visitor can read the private event's RSVPs
-  // (needed for their own status and the member list); anonymous cannot.
-  const rsvp = `gp_rsvps/${V2_PRIVATE}/rsvps/${RSVPER}`;
-  await assertSucceeds(as(OTHER).doc(rsvp).get());
-  await assertSucceeds(as(OTHER).collection(`gp_rsvps/${V2_PRIVATE}/rsvps`).get());
-  await assertFails(as(null).doc(rsvp).get());
-  await assertFails(as(null).collection(`gp_rsvps/${V2_PRIVATE}/rsvps`).get());
-  await assertSucceeds(as(OWNER).doc(rsvp).get());
+
+  // RSVP reads: owner or self only. A signed-in link visitor can still open the
+  // event, but can no longer list other attendees' contact details/approval.
+  const mine = `gp_rsvps/${V2_PRIVATE}/rsvps/${RSVPER}`;
+  const theirs = `gp_rsvps/${V2_PRIVATE}/rsvps/${OTHER}`;
+  await assertSucceeds(as(RSVPER).doc(mine).get());
+  await assertFails(as(RSVPER).doc(theirs).get());
+  await assertSucceeds(as(OTHER).doc(theirs).get());
+  await assertFails(as(OTHER).doc(mine).get());
+  // Rules are not filters: a collection read containing any other member's
+  // RSVP is denied, while the event owner may list them all.
+  await assertFails(as(RSVPER).collection(`gp_rsvps/${V2_PRIVATE}/rsvps`).get());
+  await assertFails(as(OTHER).collection(`gp_rsvps/${V2_PRIVATE}/rsvps`).get());
+  await assertSucceeds(as(OWNER).doc(mine).get());
   await assertSucceeds(as(OWNER).collection(`gp_rsvps/${V2_PRIVATE}/rsvps`).get());
-  // Public events remain readable by anonymous visitors as before.
-  await assertSucceeds(as(null).collection(`gp_rsvps/${V2_PUBLIC}/rsvps`).get());
+  // Anonymous visitors cannot read raw RSVPs, even on a public event.
+  await assertFails(as(null).doc(mine).get());
+  await assertFails(as(null).collection(`gp_rsvps/${V2_PRIVATE}/rsvps`).get());
+  await assertFails(as(null).doc(`gp_rsvps/${V2_PUBLIC}/rsvps/${RSVPER}`).get());
+  await assertFails(as(null).collection(`gp_rsvps/${V2_PUBLIC}/rsvps`).get());
+
+  // Public attendee data is a separate, world-readable, name-only projection.
+  const projected = await assertSucceeds(as(null).doc(`gp_members_public/${V2_PRIVATE}/m/${RSVPER}`).get());
+  assert.equal(projected.data().name, "Ada");
+  for (const secret of ["uid", "email", "phone", "answers", "status", "passToken"]) {
+    assert.equal(projected.data()[secret], undefined);
+  }
+  const pubList = await assertSucceeds(as(null).collection(`gp_members_public/${V2_PUBLIC}/m`).get());
+  assert.equal(pubList.size, 2);
+  // Only the member themselves or the owner may write the projection.
+  await assertSucceeds(as(RSVPER).doc(`gp_members_public/${V2_PRIVATE}/m/${RSVPER}`).update({ name: "Lin" }));
+  await assertFails(as(OTHER).doc(`gp_members_public/${V2_PRIVATE}/m/${RSVPER}`).update({ name: "Hacked" }));
+  await assertSucceeds(as(OWNER).doc(`gp_members_public/${V2_PRIVATE}/m/${RSVPER}`).update({ name: "Owner edit" }));
 });
 
 test("41. v2 event create needs a matching ownerId; update/delete are owner-only", async () => {
@@ -717,4 +792,216 @@ test("49. v2 owner issues a pass + roster row + gate total atomically; members c
   await assertFails(as(OWNER).doc(`gp_passes/${"U".repeat(32)}`).set({
     ...pass, gateCode: APPROVAL_CODE,
   }));
+});
+
+// ---- Security regressions from 0306d47 / be9aca2 (50-55) ----
+
+const MEMBER_EVENT = "v2-member", MEMBER_CODE = "MEMB2345";
+const ISSUE_TOKEN = "I".repeat(32);
+
+// A non-approval v2 event with a real gate, one RSVP at a chosen status and,
+// optionally, the whole issued pass set (public pass + token doc + roster row).
+const seedV2WithGate = ({
+  eventId = MEMBER_EVENT, code = MEMBER_CODE, rsvpUid = OTHER,
+  status = "approved", withPass = false, token = ISSUE_TOKEN, approval = false,
+} = {}) => env.withSecurityRulesDisabled(async (ctx) => {
+  const db = ctx.firestore();
+  const at = new Date();
+  await db.doc(`gp_events_v2/${eventId}`).set({
+    ownerId: OWNER, title: "Member Event", visibility: "public",
+    approval, gateCode: code, cover: "crowd", startsAt: at,
+    endsAt: new Date(at.getTime() + 3600000), location: "Hall",
+  });
+  await db.doc(`gp_gates/${code}`).set({
+    eventId, name: "Member Event", total: 0, checked: 0, bounced: 0, recent: [],
+  });
+  await db.doc(`gp_rsvps/${eventId}/rsvps/${rsvpUid}`).set({
+    uid: rsvpUid, name: "Ada", email: "ada@x.com", status, at,
+  });
+  await db.doc(`gp_members_public/${eventId}/m/${rsvpUid}`).set({ name: "Ada" });
+  if (withPass) {
+    await db.doc(`gp_passes/${token}`).set({
+      id: rsvpUid, eventId, event: { name: "Member Event" },
+      name: "Ada", checkedInAt: null, gate: "",
+    });
+    await db.doc(`gp_pass_tokens/${eventId}/tokens/${rsvpUid}`).set({
+      passToken: token, updatedAt: at,
+    });
+    await db.doc(`gp_gates/${code}/roster/${rsvpUid}`).set({
+      name: "Ada", nameLower: "ada", hint: "ad•••@x.com", token,
+      checkedInAt: null, gate: "",
+    });
+  }
+});
+
+// What a member's legitimate self-issue batch writes: public pass + the
+// separate token doc (+ roster row and the single gate-total increment).
+const memberPassBatch = (db, {
+  uid = OTHER, eventId = MEMBER_EVENT, token = ISSUE_TOKEN,
+  roster = false, totalDelta,
+} = {}) => {
+  const batch = writeBatch(db);
+  batch.set(db.doc(`gp_passes/${token}`), {
+    id: uid, eventId, event: { name: "Member Event" },
+    name: "Ada", checkedInAt: null, gate: "",
+  });
+  batch.set(db.doc(`gp_pass_tokens/${eventId}/tokens/${uid}`), {
+    passToken: token, updatedAt: serverTimestamp(),
+  });
+  if (roster) batch.set(db.doc(`gp_gates/${MEMBER_CODE}/roster/${uid}`), {
+    name: "Ada", nameLower: "ada", hint: "ad•••@x.com", token,
+    checkedInAt: null, gate: "",
+  });
+  if (totalDelta !== undefined) batch.update(db.doc(`gp_gates/${MEMBER_CODE}`), { total: totalDelta });
+  return batch;
+};
+
+test("50. a member cannot forge a pass on an approval event or without an approved own RSVP", async () => {
+  // Approval event: even an approved member cannot write their own pass; the
+  // host must issue it (the owner grant is exercised by test 49).
+  await seedV2WithGate({ status: "approved", approval: true });
+  await assertFails(memberPassBatch(as(OTHER), { token: "V".repeat(32) }).commit());
+  await assertFails(as(OTHER).doc(`gp_passes/${"W".repeat(32)}`).set({
+    id: OTHER, eventId: MEMBER_EVENT, event: { name: "Member Event" },
+    name: "Ada", checkedInAt: null, gate: "",
+  }));
+
+  // Non-approval event, but the member's RSVP is pending/rejected: no pass.
+  for (const [status, token] of [["pending", "X".repeat(32)], ["rejected", "Y".repeat(32)]]) {
+    await env.clearFirestore();
+    await seedV2WithGate({ status });
+    await assertFails(memberPassBatch(as(OTHER), { token }).commit());
+  }
+  // Without a token doc the pass create grant is refused too.
+  await assertFails(as(OTHER).doc(`gp_passes/${"a".repeat(32)}`).set({
+    id: OTHER, eventId: MEMBER_EVENT, event: { name: "Member Event" },
+    name: "Ada", checkedInAt: null, gate: "",
+  }));
+  // No RSVP at all: still denied.
+  await assertFails(memberPassBatch(as(RSVPER), { uid: RSVPER, token: "b".repeat(32) }).commit());
+
+  // Positive control: an approved own RSVP on a non-approval event may issue
+  // pass + token doc + roster row + the one-point gate increment atomically.
+  await env.clearFirestore();
+  await seedV2WithGate({ status: "approved" });
+  await assertSucceeds(memberPassBatch(as(OTHER), { roster: true, totalDelta: 1 }).commit());
+  const issued = await as(null).doc(`gp_passes/${ISSUE_TOKEN}`).get();
+  assert.equal(issued.data().id, OTHER);
+  assert.equal(issued.data().gateCode, undefined);
+});
+
+test("51. a pass token doc is readable only by its member or the event owner", async () => {
+  await seedV2WithGate({ withPass: true });
+  const path = `gp_pass_tokens/${MEMBER_EVENT}/tokens/${OTHER}`;
+  await assertSucceeds(as(OTHER).doc(path).get());
+  await assertSucceeds(as(OWNER).doc(path).get());
+  await assertFails(as(RSVPER).doc(path).get());
+  await assertFails(as(null).doc(path).get());
+  await assertSucceeds(as(OWNER).collection(`gp_pass_tokens/${MEMBER_EVENT}/tokens`).get());
+  await assertFails(as(RSVPER).collection(`gp_pass_tokens/${MEMBER_EVENT}/tokens`).get());
+  await assertFails(as(null).collection(`gp_pass_tokens/${MEMBER_EVENT}/tokens`).get());
+  // The token is split out of the RSVP, so an RSVP reader cannot leak it.
+  const rsvp = await as(OWNER).doc(`gp_rsvps/${MEMBER_EVENT}/rsvps/${OTHER}`).get();
+  assert.equal(rsvp.data().passToken, undefined);
+  // A different member cannot mint or overwrite somebody else's token doc.
+  await assertFails(as(RSVPER).doc(path).set({ passToken: "c".repeat(32), updatedAt: serverTimestamp() }));
+  await assertFails(as(RSVPER).doc(path).update({ passToken: "d".repeat(32) }));
+});
+
+test("52. a gate claim is denied when the pass's RSVP is pending or revoked (rejected)", async () => {
+  const claim = () => ({
+    eventId: MEMBER_EVENT, token: ISSUE_TOKEN, name: "Ada",
+    gate: "Gate 1", device: "dev", scannedAt: serverTimestamp(),
+  });
+  for (const status of ["pending", "rejected"]) {
+    await env.clearFirestore();
+    await seedV2WithGate({ status, withPass: true });
+    await assertFails(as(null).doc(`gp_gates/${MEMBER_CODE}/claims/${OTHER}`).set(claim()));
+  }
+  // Approved control: the same first scan creates the one-shot claim.
+  await env.clearFirestore();
+  await seedV2WithGate({ status: "approved", withPass: true });
+  await assertSucceeds(as(null).doc(`gp_gates/${MEMBER_CODE}/claims/${OTHER}`).set(claim()));
+  await assertFails(as(null).doc(`gp_gates/${MEMBER_CODE}/claims/${OTHER}`).set(claim()));
+});
+
+test("53. a member may only raise the gate total by one, with an approved own RSVP", async () => {
+  await seedV2WithGate({ status: "approved" });
+  const gate = `gp_gates/${MEMBER_CODE}`;
+  // +2 is refused both directly and inside an otherwise legitimate issue batch.
+  await assertFails(as(OTHER).doc(gate).update({ total: 2 }));
+  await assertFails(memberPassBatch(as(OTHER), { token: "e".repeat(32), totalDelta: 2 }).commit());
+  assert.equal((await as(null).doc(gate).get()).data().total, 0); // batches are atomic
+  await assertSucceeds(as(OTHER).doc(gate).update({ total: 1 }));
+  // With no approved RSVP even a +1 nudge is denied.
+  await env.clearFirestore();
+  await seedV2WithGate({ status: "pending" });
+  await assertFails(as(OTHER).doc(gate).update({ total: 1 }));
+});
+
+test("54. revoking an RSVP deletes its pass, token doc and gate roster row", async () => {
+  // Owner removing a member (rejectMember/deleteRsvp's revoke batch).
+  await seedV2WithGate({ withPass: true });
+  const db = as(OWNER);
+  const revoke = writeBatch(db);
+  revoke.delete(db.doc(`gp_passes/${ISSUE_TOKEN}`));
+  revoke.delete(db.doc(`gp_pass_tokens/${MEMBER_EVENT}/tokens/${OTHER}`));
+  revoke.delete(db.doc(`gp_gates/${MEMBER_CODE}/roster/${OTHER}`));
+  revoke.delete(db.doc(`gp_members_public/${MEMBER_EVENT}/m/${OTHER}`));
+  revoke.delete(db.doc(`gp_rsvps/${MEMBER_EVENT}/rsvps/${OTHER}`));
+  await assertSucceeds(revoke.commit());
+  await missing(as(null), `gp_passes/${ISSUE_TOKEN}`);
+  await missing(as(OWNER), `gp_pass_tokens/${MEMBER_EVENT}/tokens/${OTHER}`);
+  await missing(as(null), `gp_gates/${MEMBER_CODE}/roster/${OTHER}`);
+  await missing(as(OWNER), `gp_rsvps/${MEMBER_EVENT}/rsvps/${OTHER}`);
+  await missing(as(null), `gp_members_public/${MEMBER_EVENT}/m/${OTHER}`);
+
+  // A member cancelling their own RSVP can revoke their own issued pass too.
+  await env.clearFirestore();
+  await seedV2WithGate({ withPass: true });
+  const self = as(OTHER);
+  const own = writeBatch(self);
+  own.delete(self.doc(`gp_passes/${ISSUE_TOKEN}`));
+  own.delete(self.doc(`gp_pass_tokens/${MEMBER_EVENT}/tokens/${OTHER}`));
+  own.delete(self.doc(`gp_gates/${MEMBER_CODE}/roster/${OTHER}`));
+  own.delete(self.doc(`gp_members_public/${MEMBER_EVENT}/m/${OTHER}`));
+  own.delete(self.doc(`gp_rsvps/${MEMBER_EVENT}/rsvps/${OTHER}`));
+  await assertSucceeds(own.commit());
+  await missing(as(null), `gp_passes/${ISSUE_TOKEN}`);
+  await missing(as(null), `gp_gates/${MEMBER_CODE}/roster/${OTHER}`);
+});
+
+test("55. event deletion cleans up gate, roster, pass, token and RSVPs before the event", async () => {
+  await seedV2WithGate({ withPass: true });
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().doc(`gp_users/${OWNER}/createdEvents/${MEMBER_EVENT}`).set({ title: "Member Event" });
+  });
+  await assertFails(as(OTHER).doc(`gp_events_v2/${MEMBER_EVENT}`).delete());
+
+  // Mirrors deleteV2Event(): gate-dependent docs go first while the event
+  // still exists, then RSVPs and the event/index in a final batch.
+  const db = as(OWNER);
+  const cleanup = writeBatch(db);
+  cleanup.delete(db.doc(`gp_passes/${ISSUE_TOKEN}`));
+  cleanup.delete(db.doc(`gp_pass_tokens/${MEMBER_EVENT}/tokens/${OTHER}`));
+  cleanup.delete(db.doc(`gp_gates/${MEMBER_CODE}/roster/${OTHER}`));
+  cleanup.delete(db.doc(`gp_members_public/${MEMBER_EVENT}/m/${OTHER}`));
+  cleanup.delete(db.doc(`gp_gates/${MEMBER_CODE}`));
+  await assertSucceeds(cleanup.commit());
+
+  const final = writeBatch(db);
+  final.delete(db.doc(`gp_rsvps/${MEMBER_EVENT}/rsvps/${OTHER}`));
+  final.delete(db.doc(`gp_events_v2/${MEMBER_EVENT}`));
+  final.delete(db.doc(`gp_users/${OWNER}/createdEvents/${MEMBER_EVENT}`));
+  await assertSucceeds(final.commit());
+
+  await missing(as(OWNER), `gp_events_v2/${MEMBER_EVENT}`);
+  await missing(as(OWNER), `gp_users/${OWNER}/createdEvents/${MEMBER_EVENT}`);
+  await missing(as(null), `gp_passes/${ISSUE_TOKEN}`);
+  // The gate get grant itself checks exists(), so a deleted gate is denied.
+  await assertFails(as(null).doc(`gp_gates/${MEMBER_CODE}`).get());
+  // Token/RSVP owner read grants look up the event, which no longer exists.
+  await assertFails(as(OWNER).doc(`gp_pass_tokens/${MEMBER_EVENT}/tokens/${OTHER}`).get());
+  await assertFails(as(OWNER).doc(`gp_rsvps/${MEMBER_EVENT}/rsvps/${OTHER}`).get());
+  await missing(as(null), `gp_members_public/${MEMBER_EVENT}/m/${OTHER}`);
 });

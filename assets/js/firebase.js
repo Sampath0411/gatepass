@@ -855,6 +855,8 @@ export async function deleteV2Event(id) {
       if (token) cleanup.push(doc(db, PASS_PUB, token));
       cleanup.push(tokenSnap.ref);
     }
+    // Name-only projection: the owner may delete any member's public row.
+    cleanup.push(doc(db, "gp_members_public", id, "m", r.id));
   }
   if (gateCode) {
     const roster = await getDocs(collection(db, GATES, gateCode, "roster"));
@@ -905,6 +907,12 @@ export async function rsvpEvent(eventId, user, answers = {}) {
     at: serverTimestamp(),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
+  });
+  // The public name projection belongs to the RSVP, not to the pass: pending
+  // approval members must still appear in attendee counts (and see their own
+  // status banner) before a pass has been issued.
+  batch.set(doc(db, "gp_members_public", eventId, "m", uid), {
+    name: answers.name ?? u.displayName ?? "",
   });
   if (approved) issuePassBatch(batch, event || { id: eventId }, uid, answers, rsvpRef, token);
   await batch.commit();
@@ -979,7 +987,8 @@ export async function getMemberPass(eventId, uid) {
 }
 
 export async function updateRsvp(eventId, uid, answers = {}) {
-  await updateDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid), {
+  const batch = writeBatch(db);
+  batch.update(doc(db, RSVPS, eventId, RSVP_SUB, uid), {
     name: answers.name ?? "",
     email: answers.email ?? "",
     phone: answers.phone ?? "",
@@ -987,13 +996,19 @@ export async function updateRsvp(eventId, uid, answers = {}) {
     answers,
     updatedAt: serverTimestamp(),
   });
+  // Keep the world-readable attendee name in sync with the RSVP.
+  batch.set(doc(db, "gp_members_public", eventId, "m", uid), {
+    name: answers.name ?? "",
+  });
+  await batch.commit();
 }
 
 export async function deleteRsvp(eventId, uid) {
   // Revoke the issued pass in the same batch as the RSVP removal: a deleted
-  // RSVP must never leave a still-valid QR pass behind.
+  // RSVP must never leave a still-valid QR pass behind (nor a stale projection).
   const batch = writeBatch(db);
   await revokePassBatch(batch, eventId, uid);
+  batch.delete(doc(db, "gp_members_public", eventId, "m", uid));
   batch.delete(doc(db, RSVPS, eventId, RSVP_SUB, uid));
   await batch.commit();
 }

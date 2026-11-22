@@ -26,7 +26,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { initializeTestEnvironment } from "@firebase/rules-unit-testing";
+import { initializeTestEnvironment, assertFails, assertSucceeds } from "@firebase/rules-unit-testing";
 
 const E2E_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(E2E_DIR, "../..");
@@ -224,6 +224,38 @@ async function readGateDoc(code) {
   return data;
 }
 
+/** The pass capability now lives in its own owner/member-readable doc. */
+async function readPassToken(eventId, uid) {
+  let token = null;
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const snap = await ctx.firestore().doc(`gp_pass_tokens/${eventId}/tokens/${uid}`).get();
+    const hasDoc = typeof snap.exists === "function" ? snap.exists() : snap.exists;
+    if (hasDoc) token = snap.data().passToken || null;
+  });
+  return token;
+}
+
+/** Read the world-readable, name-only attendee projection (admin view). */
+async function readPublicMembers(eventId) {
+  let rows;
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    rows = (await ctx.firestore().collection(`gp_members_public/${eventId}/m`).get()).docs
+      .map((d) => ({ uid: d.id, ...d.data() }));
+  });
+  return rows;
+}
+
+/** Verify the document actually exists with rules disabled (reads of missing
+ * docs are allowed by some grants, so exists() is the reliable assertion). */
+async function existsWithAdmin(path) {
+  let exists = false;
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const snap = await ctx.firestore().doc(path).get();
+    exists = typeof snap.exists === "function" ? snap.exists() : snap.exists;
+  });
+  return exists;
+}
+
 // Gate-phone helpers, mirroring e2e/duplicate-scan.spec.js. The gate is
 // unauthenticated (makeContext(browser, null)), so the same join/scan flow
 // works for the guest list produced by approval.
@@ -325,6 +357,18 @@ test.describe("Luma events homepage", () => {
     await expect(rsvpForm).toHaveCount(0);
     await expect(attendeePage.locator(".l-rsvp-top strong")).toHaveText("1 going");
     await expect(attendeePage.locator('[data-action="cancel-rsvp"]')).toBeVisible();
+
+    // Security: the going count comes from the public projection, not from
+    // raw RSVP reads. A signed-in non-owner cannot read another member's RSVP
+    // (this checks the emulator rules directly, via the test env).
+    const rsvpPath = `gp_rsvps/${id}/rsvps/${ATTENDEE}`;
+    await assertSucceeds(env.authenticatedContext(ATTENDEE).firestore().doc(rsvpPath).get());
+    const outsider = env.authenticatedContext("e2e-events-outsider").firestore();
+    await assertFails(outsider.doc(rsvpPath).get());
+    await assertFails(outsider.collection(`gp_rsvps/${id}/rsvps`).get());
+    await assertFails(env.unauthenticatedContext().firestore().doc(rsvpPath).get());
+    const projected = await readPublicMembers(id);
+    expect(projected).toEqual([{ uid: ATTENDEE, name: ATTENDEE }]);
 
     // The owner sees the same count from a fresh full page load. (The app
     // caches RSVP counts per page session, so a hash-only navigation would
@@ -462,6 +506,10 @@ test.describe("Luma events homepage", () => {
     expect(pending.rsvps).toHaveLength(1);
     expect(pending.rsvps[0].status).toBe("pending");
     expect(pending.rsvps[0].passToken).toBeUndefined();
+    // Pending members still appear in the world-readable name-only projection.
+    const pendingPublic = await readPublicMembers(id);
+    expect(pendingPublic).toEqual([{ uid: ATTENDEE, name: ATTENDEE }]);
+    expect(pendingPublic[0].status).toBeUndefined();
 
     // ── 5. host approves from the member table ──
     await ownerPage.goto(`/?fresh=owner-detail#/event/${id}`);
@@ -473,9 +521,16 @@ test.describe("Luma events homepage", () => {
     await expect(row.locator(".l-member-status")).toHaveText("Approved");
     const approved = await readEventData(id);
     expect(approved.rsvps[0].status).toBe("approved");
-    const token = approved.rsvps[0].passToken;
+    // The token is no longer stored on the RSVP (an RSVP reader must not get
+    // a scan capability); it lives in the owner/member-only token doc.
+    expect(approved.rsvps[0].passToken).toBeUndefined();
+    const token = await readPassToken(id, ATTENDEE);
     expect(token).toMatch(/^[A-Za-z0-9_-]{32,}$/);
-    // Approving issued the pass and bumped the gate total.
+    // Approving issued the pass, the public name projection and bumped the
+    // gate total. A non-owner cannot read the raw RSVP, but can see the name.
+    expect(await readPublicMembers(id)).toEqual([{ uid: ATTENDEE, name: ATTENDEE }]);
+    await assertFails(
+      env.authenticatedContext("e2e-events-outsider").firestore().doc(`gp_rsvps/${id}/rsvps/${ATTENDEE}`).get());
     const gate = await readGateDoc(code);
     expect(gate.total).toBe(1);
 
@@ -511,6 +566,24 @@ test.describe("Luma events homepage", () => {
     expect(scanned.checked).toBe(1);
     expect(scanned.bounced).toBe(1);
 
+    // ── 8. revoking the member removes the pass; the old QR no longer scans green ──
+    ownerPage.once("dialog", (d) => d.accept());
+    await ownerPage.locator('[data-action="member-delete"]').click();
+    // Check the authoritative state with emulator admin reads: the host page's
+    // Firestore socket can be stale by then, so its member table is not the
+    // assertion surface here.
+    await expect.poll(() => existsWithAdmin(`gp_rsvps/${id}/rsvps/${ATTENDEE}`)).toBe(false);
+    expect(await existsWithAdmin(`gp_passes/${token}`)).toBe(false);
+    expect(await existsWithAdmin(`gp_pass_tokens/${id}/tokens/${ATTENDEE}`)).toBe(false);
+    expect(await existsWithAdmin(`gp_gates/${code}/roster/${ATTENDEE}`)).toBe(false);
+    expect(await existsWithAdmin(`gp_members_public/${id}/m/${ATTENDEE}`)).toBe(false);
+    const phone3 = await (await makeContext(browser, null)).newPage();
+    await joinGate(phone3, code, "Gate 3", "1 / 1");
+    await scan(phone3, passUrl);
+    await expect(phone3.locator("#verdict")).toHaveClass(/\bwarn\b/);
+    await expect(phone3.locator("#verdict")).toContainText("Not on the list");
+
+    await phone3.close();
     await passPage.close();
     await phone1.close();
     await phone2.close();
