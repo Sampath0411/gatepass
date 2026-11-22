@@ -473,19 +473,35 @@ test("39. public v2 event: get is open to all; list needs the visibility filter;
   await assertFails(as(OTHER).collection(`gp_users/${OWNER}/createdEvents`).get());
 });
 
-test("40. private v2 event is hidden from non-owners, including its RSVPs", async () => {
+test("40. private v2 event: signed-in link visitor gets it and its RSVPs; anonymous cannot; lists stay public-only", async () => {
   await seedV2();
+  // The long event URL is the capability: any signed-in link-holder may GET a
+  // private event, even though they never see it in a feed. Anonymous cannot.
   await assertFails(as(null).doc(`gp_events_v2/${V2_PRIVATE}`).get());
-  await assertFails(as(OTHER).doc(`gp_events_v2/${V2_PRIVATE}`).get());
+  await assertSucceeds(as(OTHER).doc(`gp_events_v2/${V2_PRIVATE}`).get());
   await assertSucceeds(as(OWNER).doc(`gp_events_v2/${V2_PRIVATE}`).get());
-  // RSVP reads follow the event's visibility: public is open, private is owner-only.
-  await assertSucceeds(as(null).collection(`gp_rsvps/${V2_PUBLIC}/rsvps`).get());
-  await assertSucceeds(as(null).doc(`gp_rsvps/${V2_PUBLIC}/rsvps/${OTHER}`).get());
+  // List queries still exclude private events for everyone (rules are NOT
+  // filters: the client always carries the visibility filter).
+  const anonList = await assertSucceeds(
+    as(null).collection("gp_events_v2").where("visibility", "==", "public").get());
+  assert.equal(anonList.size, 1);
+  assert.equal(anonList.docs[0].id, V2_PUBLIC);
+  const linkList = await assertSucceeds(
+    as(OTHER).collection("gp_events_v2").where("visibility", "==", "public").get());
+  assert.equal(linkList.size, 1);
+  assert.equal(linkList.docs[0].id, V2_PUBLIC);
+  await assertFails(as(OTHER).collection("gp_events_v2").get()); // bare list hits the private doc
+  // RSVP reads: a signed-in link visitor can read the private event's RSVPs
+  // (needed for their own status and the member list); anonymous cannot.
+  const rsvp = `gp_rsvps/${V2_PRIVATE}/rsvps/${RSVPER}`;
+  await assertSucceeds(as(OTHER).doc(rsvp).get());
+  await assertSucceeds(as(OTHER).collection(`gp_rsvps/${V2_PRIVATE}/rsvps`).get());
+  await assertFails(as(null).doc(rsvp).get());
   await assertFails(as(null).collection(`gp_rsvps/${V2_PRIVATE}/rsvps`).get());
-  await assertFails(as(OTHER).collection(`gp_rsvps/${V2_PRIVATE}/rsvps`).get());
-  await assertFails(as(OTHER).doc(`gp_rsvps/${V2_PRIVATE}/rsvps/${OTHER}`).get());
+  await assertSucceeds(as(OWNER).doc(rsvp).get());
   await assertSucceeds(as(OWNER).collection(`gp_rsvps/${V2_PRIVATE}/rsvps`).get());
-  await assertSucceeds(as(OWNER).doc(`gp_rsvps/${V2_PRIVATE}/rsvps/${OTHER}`).get());
+  // Public events remain readable by anonymous visitors as before.
+  await assertSucceeds(as(null).collection(`gp_rsvps/${V2_PUBLIC}/rsvps`).get());
 });
 
 test("41. v2 event create needs a matching ownerId; update/delete are owner-only", async () => {
@@ -598,5 +614,107 @@ test("46. configurable fields: event carries formFields and member answers are s
   // Create remains own-only even for an event with custom fields.
   await assertFails(as(null).doc(`gp_rsvps/${V2_FIELDS}/rsvps/anon`).set({
     uid: "anon", ...answers, answers, at: new Date(),
+  }));
+});
+
+// ---- Sharing / approval / QR pass issuing (47-50) ----
+
+const V2_APPROVAL = "v2-approval";
+const APPROVAL_CODE = "APPR2345";
+const PASS_TOKEN = "T".repeat(32);
+
+// Approval-on, link-only event with its gate and two pending/rejected RSVPs.
+const seedV2Approval = () => env.withSecurityRulesDisabled(async (ctx) => {
+  const db = ctx.firestore();
+  const at = new Date();
+  await db.doc(`gp_events_v2/${V2_APPROVAL}`).set({
+    ownerId: OWNER, title: "Approval V2 Event", visibility: "private",
+    approval: true, gateCode: APPROVAL_CODE, cover: "crowd",
+    startsAt: at, endsAt: new Date(at.getTime() + 3600000), location: "Hall",
+    price: "Free", capacity: 0,
+  });
+  await db.doc(`gp_gates/${APPROVAL_CODE}`).set({
+    eventId: V2_APPROVAL, name: "Approval V2 Event", total: 0,
+    checked: 0, bounced: 0, recent: [],
+  });
+  await db.doc(`gp_rsvps/${V2_APPROVAL}/rsvps/${OTHER}`).set({
+    uid: OTHER, name: "Ada", email: "ada@x.com",
+    answers: { name: "Ada", email: "ada@x.com" }, status: "pending", at,
+  });
+  await db.doc(`gp_rsvps/${V2_APPROVAL}/rsvps/${RSVPER}`).set({
+    uid: RSVPER, name: "Lin", email: "lin@x.com", status: "rejected", at,
+  });
+});
+
+test("47. approval writes: the owner approves/rejects any member, other users cannot", async () => {
+  await seedV2Approval();
+  const rsvp = (uid) => `gp_rsvps/${V2_APPROVAL}/rsvps/${uid}`;
+  const reviewed = { reviewedAt: new Date(), reviewedBy: OWNER };
+  // approveMember()'s status + passToken write, and rejectMember()'s write.
+  await assertSucceeds(as(OWNER).doc(rsvp(OTHER)).update({
+    status: "approved", passToken: PASS_TOKEN, ...reviewed,
+  }));
+  await assertSucceeds(as(OWNER).doc(rsvp(OTHER)).update({ status: "rejected", ...reviewed }));
+  // A different signed-in member, and an anonymous caller, cannot review anyone.
+  await assertFails(as(OTHER).doc(rsvp(RSVPER)).update({ status: "approved", passToken: PASS_TOKEN }));
+  await assertFails(as(null).doc(rsvp(RSVPER)).update({ status: "rejected" }));
+});
+
+test("48. a member cannot self-approve on an approval event, but may edit details / resubmit to pending", async () => {
+  await seedV2Approval();
+  const own = `gp_rsvps/${V2_APPROVAL}/rsvps/${OTHER}`;
+  // The approval state and pass token are host-only capabilities.
+  await assertFails(as(OTHER).doc(own).update({ status: "approved" }));
+  await assertFails(as(OTHER).doc(own).update({ status: "approved", passToken: PASS_TOKEN }));
+  await assertFails(as(OTHER).doc(own).update({ passToken: PASS_TOKEN }));
+  await assertFails(as(OTHER).doc(`gp_rsvps/${V2_APPROVAL}/rsvps/fresh-self-approve`).set({
+    uid: "fresh-self-approve", name: "Lin", status: "approved", passToken: PASS_TOKEN,
+  }));
+  // Normal detail edits still work, and a rejected member may resubmit a
+  // fresh pending request (rsvpEvent()'s set() is an update of the same doc).
+  await assertSucceeds(as(OTHER).doc(own).update({
+    name: "Ada Lovelace", answers: { name: "Ada Lovelace", email: "ada@x.com" },
+  }));
+  const rejected = `gp_rsvps/${V2_APPROVAL}/rsvps/${RSVPER}`;
+  await assertSucceeds(as(RSVPER).doc(rejected).set({
+    uid: RSVPER, name: "Lin", status: "pending",
+    answers: { name: "Lin" }, at: new Date(),
+  }));
+  // Even after resubmitting, approval is still the host's call.
+  await assertFails(as(RSVPER).doc(rejected).update({ status: "approved", passToken: PASS_TOKEN }));
+});
+
+test("49. v2 owner issues a pass + roster row + gate total atomically; members cannot on approval events", async () => {
+  await seedV2Approval();
+  const db = as(OWNER);
+  const pass = {
+    id: OTHER, eventId: V2_APPROVAL, event: { name: "Approval V2 Event" },
+    name: "Ada", checkedInAt: null, gate: "",
+  };
+  const batch = writeBatch(db);
+  batch.set(db.doc(`gp_passes/${PASS_TOKEN}`), pass);
+  batch.set(db.doc(`gp_gates/${APPROVAL_CODE}/roster/${OTHER}`), {
+    name: "Ada", nameLower: "ada", hint: "ad•••@x.com", token: PASS_TOKEN,
+    checkedInAt: null, gate: "",
+  });
+  batch.update(db.doc(`gp_gates/${APPROVAL_CODE}`), { total: 1 });
+  await assertSucceeds(batch.commit());
+  const issued = await as(null).doc(`gp_passes/${PASS_TOKEN}`).get();
+  assert.equal(issued.data().eventId, V2_APPROVAL);
+  assert.equal(issued.data().gateCode, undefined);
+  assert.equal(issued.data().event.gateCode, undefined);
+
+  // The same writes by a member are refused for an approval event: no
+  // self-issued roster row and no self-incremented gate total.
+  const member = as(OTHER);
+  const bad = writeBatch(member);
+  bad.set(member.doc(`gp_gates/${APPROVAL_CODE}/roster/${RSVPER}`), {
+    name: "Lin", nameLower: "lin", hint: "li•••@x.com", token: PASS_TOKEN,
+  });
+  bad.update(member.doc(`gp_gates/${APPROVAL_CODE}`), { total: 2 });
+  await assertFails(bad.commit());
+  // And an owner cannot smuggle the gate code into a public pass document.
+  await assertFails(as(OWNER).doc(`gp_passes/${"U".repeat(32)}`).set({
+    ...pass, gateCode: APPROVAL_CODE,
   }));
 });

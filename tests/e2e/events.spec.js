@@ -178,7 +178,13 @@ async function makeContext(browser, uid) {
     const importPattern = /serverTimestamp,\s*increment,\s*onSnapshot,\s*\} from "firebase\/firestore";/;
     const dbPattern = /export const db = app \? getFirestore\(app\) : null;/;
     const importReplacement = 'serverTimestamp, increment, onSnapshot, connectFirestoreEmulator,\n} from "firebase/firestore";';
-    const dbReplacement = `export const db = app ? (() => { const d = getFirestore(app); connectFirestoreEmulator(d, "${HOST}", ${PORT}, { mockUserToken: { sub: ${JSON.stringify(uid)} } }); return d; })() : null;`;
+    // A uid gives the emulator a mock auth token so rules see that user. With
+    // no uid the context is an anonymous gate phone (rules see request.auth ==
+    // null), exactly like the duplicate-scan spec.
+    const dbExpr = uid
+      ? `(() => { const d = getFirestore(app); connectFirestoreEmulator(d, "${HOST}", ${PORT}, { mockUserToken: { sub: ${JSON.stringify(uid)} } }); return d; })()`
+      : `(() => { const d = getFirestore(app); connectFirestoreEmulator(d, "${HOST}", ${PORT}); return d; })()`;
+    const dbReplacement = `export const db = app ? ${dbExpr} : null;`;
 
     const haveImport = importPattern.test(body);
     const haveDb = dbPattern.test(body);
@@ -207,6 +213,31 @@ async function readEventData(id) {
   });
   return data;
 }
+
+/** Read a gate doc with rules disabled (emulator admin). */
+async function readGateDoc(code) {
+  let data;
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const snap = await ctx.firestore().doc(`gp_gates/${code}`).get();
+    data = snap.data();
+  });
+  return data;
+}
+
+// Gate-phone helpers, mirroring e2e/duplicate-scan.spec.js. The gate is
+// unauthenticated (makeContext(browser, null)), so the same join/scan flow
+// works for the guest list produced by approval.
+async function joinGate(page, code, gateName, expectedCount = "0 / 1") {
+  await page.goto("/gate/");
+  await expect(page.locator("#joinForm")).toBeVisible();
+  await page.locator("#code").fill(code);
+  await page.locator(`input[name="gate"][value="${gateName}"]`).check({ force: true });
+  await page.locator("#joinBtn").click();
+  await expect(page.locator("#scan")).toBeVisible();
+  await page.waitForFunction(() => !!window.GatePassGate, null, { timeout: 20000 });
+  await expect(page.locator("#cNum")).toHaveText(expectedCount);
+}
+const scan = (page, url) => page.evaluate((u) => window.GatePassGate.handleText(u), url);
 
 test.describe("Luma events homepage", () => {
   test.setTimeout(240000);
@@ -306,13 +337,14 @@ test.describe("Luma events homepage", () => {
     await expect(members).toBeVisible();
     await expect(ownerPage.locator(".l-members-title")).toHaveText("Members (1)");
     const head = ownerPage.locator(".l-member-table thead th");
-    await expect(head).toHaveText(["Full name", "Email", "Phone number", "College", "Joined", "Actions"]);
+    await expect(head).toHaveText(["Full name", "Email", "Phone number", "College", "Status", "Joined", "Actions"]);
     const row = ownerPage.locator("#l-member-rows tr");
     await expect(row).toHaveCount(1);
     await expect(row).toContainText(ATTENDEE);
     await expect(row).toContainText(`${ATTENDEE}@example.com`);
     await expect(row).toContainText(PHONE);
     await expect(row).toContainText(COLLEGE);
+    await expect(row.locator(".l-member-status")).toHaveText("Approved");
 
     // CSV export carries every configured answer, not just the count.
     const [download] = await Promise.all([
@@ -320,7 +352,7 @@ test.describe("Luma events homepage", () => {
       ownerPage.locator('[data-action="members-csv"]').click(),
     ]);
     const csv = readFileSync(await download.path(), "utf8");
-    expect(csv).toContain("Full name,Email,Phone number,College,Joined");
+    expect(csv).toContain("Full name,Email,Phone number,College,Status,Joined");
     expect(csv).toContain(ATTENDEE);
     expect(csv).toContain(`${ATTENDEE}@example.com`);
     expect(csv).toContain(PHONE);
@@ -369,6 +401,119 @@ test.describe("Luma events homepage", () => {
     expect(data.rsvps[0].phone).toBe(NEW_PHONE);
     expect(data.rsvps[0].college).toBe(COLLEGE);
 
+    await attendee.close();
+    await owner.close();
+  });
+
+  test("private + approval event: link-only RSVP → pending → approval → QR pass → gate green/red", async ({ browser }) => {
+    const TITLE = "E2E Private Approval Night";
+
+    // ── 1. host creates a private event with approval enabled ──
+    const owner = await makeContext(browser, OWNER);
+    const ownerPage = await owner.newPage();
+    await ownerPage.goto("/");
+    await ownerPage.locator('[data-action="create"]').click();
+    await expect(ownerPage.locator("#l-create-form")).toBeVisible();
+    await ownerPage.locator("#l-title").fill(TITLE);
+    await ownerPage.locator("#l-location").fill("Test Hall");
+    // Both controls are visually hidden (custom switch / segmented radio), so
+    // set their checked state directly; onSubmit reads .checked from the form.
+    await ownerPage.locator('#l-create-form input[name="approval"]').evaluate((el) => { el.checked = true; });
+    await ownerPage.locator('#l-create-form input[name="visibility"][value="private"]').evaluate((el) => { el.checked = true; });
+    await ownerPage.locator('#l-create-form [type="submit"]').click();
+    await ownerPage.waitForURL(/#\/event\/[^/]+$/, { timeout: 20000 });
+    const id = new URL(ownerPage.url()).hash.replace("#/event/", "");
+    await expect(ownerPage.locator(".l-detail-title")).toHaveText(TITLE);
+
+    const created = await readEventData(id);
+    expect(created.event.visibility).toBe("private");
+    expect(created.event.approval).toBe(true);
+    const code = created.event.gateCode;
+    expect(code).toMatch(/^[A-Z0-9]{8}$/);
+    // The host sees the gate code on the event page (formatted as XXXX-XXXX).
+    await expect(ownerPage.locator(".l-gate-code")).toHaveText(`${code.slice(0, 4)}-${code.slice(4)}`);
+
+    // ── 2. a private event is absent from the feed, even for the host ──
+    await ownerPage.goto("/?fresh=owner-feed");
+    await expect(ownerPage.locator(".l-card-title")).toHaveCount(0);
+
+    // ── 3. another signed-in user opens the direct link (not in their feed) ──
+    const attendee = await makeContext(browser, ATTENDEE);
+    const attendeePage = await attendee.newPage();
+    await attendeePage.goto("/?fresh=member-feed");
+    await expect(attendeePage.locator(".l-card-title")).toHaveCount(0);
+    await attendeePage.goto(`/#/event/${id}`);
+    await expect(attendeePage.locator(".l-detail-title")).toHaveText(TITLE);
+    await expect(attendeePage.locator(".l-rsvp-top strong")).toHaveText("0 going");
+
+    // ── 4. request → pending, with no pass link ──
+    await attendeePage.locator('[data-action="rsvp"]').click();
+    const rsvpForm = attendeePage.locator("#l-rsvp-form");
+    await expect(rsvpForm).toBeVisible();
+    await expect(attendeePage.locator(".l-modal-title")).toHaveText(TITLE);
+    await attendeePage.locator("#l-rsvp-phone").fill(PHONE);
+    await attendeePage.locator("#l-rsvp-college").fill(COLLEGE);
+    await rsvpForm.locator('[type="submit"]').click();
+    await expect(rsvpForm).toHaveCount(0);
+    await expect(attendeePage.locator(".l-status-banner.is-pending")).toContainText("Awaiting approval");
+    await expect(attendeePage.locator(".l-pass-link")).toHaveCount(0);
+    await expect(attendeePage.locator(".l-rsvp-top strong")).toHaveText("1 going");
+    const pending = await readEventData(id);
+    expect(pending.rsvps).toHaveLength(1);
+    expect(pending.rsvps[0].status).toBe("pending");
+    expect(pending.rsvps[0].passToken).toBeUndefined();
+
+    // ── 5. host approves from the member table ──
+    await ownerPage.goto(`/?fresh=owner-detail#/event/${id}`);
+    await expect(ownerPage.locator(".l-members-title")).toHaveText("Members (1)");
+    const row = ownerPage.locator("#l-member-rows tr");
+    await expect(row.locator(".l-member-status")).toHaveText("Pending");
+    await expect(row.locator('[data-action="member-approve"]')).toBeVisible();
+    await row.locator('[data-action="member-approve"]').click();
+    await expect(row.locator(".l-member-status")).toHaveText("Approved");
+    const approved = await readEventData(id);
+    expect(approved.rsvps[0].status).toBe("approved");
+    const token = approved.rsvps[0].passToken;
+    expect(token).toMatch(/^[A-Za-z0-9_-]{32,}$/);
+    // Approving issued the pass and bumped the gate total.
+    const gate = await readGateDoc(code);
+    expect(gate.total).toBe(1);
+
+    // ── 6. member sees "Open my pass"; the pass page renders the QR ──
+    await attendeePage.goto(`/?fresh=member-approved#/event/${id}`);
+    const passLink = attendeePage.locator(".l-pass-link");
+    await expect(passLink).toContainText("Open my pass");
+    const passHref = await passLink.getAttribute("href");
+    expect(passHref).toContain(`/p/#${token}`);
+    const passPage = await (await makeContext(browser, null)).newPage();
+    await passPage.goto(passHref);
+    await expect(passPage.locator(".ticket")).toBeVisible();
+    await expect(passPage.locator(".t-name")).toHaveText(ATTENDEE);
+    await expect(passPage.locator(".t-qr svg")).toHaveCount(1);
+
+    // ── 7. two unauthenticated gate phones: first scan green, repeat red ──
+    const passUrl = `${baseUrl}/p/#${token}`;
+    const phone1 = await (await makeContext(browser, null)).newPage();
+    const phone2 = await (await makeContext(browser, null)).newPage();
+    await joinGate(phone1, code, "Gate 1");
+    await joinGate(phone2, code, "Gate 2");
+
+    await scan(phone1, passUrl);
+    await expect(phone1.locator("#verdict")).toHaveClass(/\bok\b/);
+    await expect(phone1.locator("#verdict")).toContainText("First scan");
+    await expect(phone1.locator("#cNum")).toHaveText("1 / 1");
+
+    await scan(phone2, passUrl);
+    await expect(phone2.locator("#verdict")).toHaveClass(/\bdup\b/);
+    await expect(phone2.locator("#verdict")).toContainText("Already scanned");
+    await expect(phone2.locator("#verdict")).toContainText("first scan at Gate 1");
+    const scanned = await readGateDoc(code);
+    expect(scanned.checked).toBe(1);
+    expect(scanned.bounced).toBe(1);
+
+    await passPage.close();
+    await phone1.close();
+    await phone2.close();
     await attendee.close();
     await owner.close();
   });

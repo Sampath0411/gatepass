@@ -218,6 +218,25 @@ service cloud.firestore {
       return signedIn()
         && get(/databases/$(database)/documents/gp_events_v2/$(eventId)).data.ownerId == request.auth.uid;
     }
+    function isApprovalEventV2(eventId) {
+      return get(/databases/$(database)/documents/gp_events_v2/$(eventId)).data.get('approval', false) == true;
+    }
+    // Approval state is a host capability: a member may edit their own details
+    // (and resubmit a rejected request back to 'pending'), but may never set
+    // themselves to 'approved' or write the pass/review fields.
+    function memberCreateApprovalOk(eventId) {
+      return !isApprovalEventV2(eventId)
+        || (request.resource.data.get('status', 'pending') != 'approved'
+            && !request.resource.data.keys().hasAny(['passToken', 'reviewedAt', 'reviewedBy']));
+    }
+    function memberUpdateApprovalOk(eventId) {
+      return !isApprovalEventV2(eventId)
+        || !request.resource.data.diff(resource.data).affectedKeys()
+             .hasAny(['status', 'passToken', 'reviewedAt', 'reviewedBy'])
+        || (!request.resource.data.diff(resource.data).affectedKeys()
+              .hasAny(['passToken', 'reviewedAt', 'reviewedBy'])
+            && request.resource.data.get('status', 'pending') == 'pending');
+    }
 
     match /gp_events_v2/{eventId} {
       // Link-only private events: the long unguessable URL is the capability,
@@ -249,8 +268,9 @@ service cloud.firestore {
       // Only the member themselves may create an RSVP. Once created, either the
       // event owner (member directory edits) or the member (own details) may
       // update/delete it.
-      allow create: if signedIn() && uid == request.auth.uid;
-      allow update: if isOwnerEventV2(eventId) || (signedIn() && uid == request.auth.uid);
+      allow create: if signedIn() && uid == request.auth.uid && memberCreateApprovalOk(eventId);
+      allow update: if isOwnerEventV2(eventId)
+        || (signedIn() && uid == request.auth.uid && memberUpdateApprovalOk(eventId));
       allow delete: if isOwnerEventV2(eventId) || (signedIn() && uid == request.auth.uid);
     }
   }
