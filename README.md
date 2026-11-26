@@ -2,7 +2,7 @@
 
 **Free QR entry passes for college club events.** Upload your registrations sheet and everyone gets their own pass. Running a fest? Group its sub-events under one fest, share a public registration link, and each student gets their pass the moment they sign in with Google. At the gate, any phone becomes the scanner. The first scan of a pass goes green; every scan after that goes red, on every phone at the gate, with the time and gate of the first scan. So a shared screenshot works once.
 
-**Use it:** https://souradip121.github.io/gatepass/
+**Use it:** https://firebase-port.vercel.app/
 **Or host your own copy for free** in five steps (below). No build step, no server, no paid plan.
 
 <p>
@@ -26,9 +26,9 @@ The homepage at `/` is now a Luma-inspired event browser. No account is needed t
 - **Event detail + RSVP** — open a card for the full description, date, venue and attendee count. **Share** copies the event link (or opens the phone's share sheet). **RSVP** opens a form that collects the event's configured fields (name and email are prefilled from Google sign-in); afterwards a guest sees **Edit my details** and **Cancel RSVP**, along with their approval status and pass link. Private events are link-only: they never show up in the feed, calendar or Discover, but any signed-in guest with the direct link can open and RSVP.
 - **Member directory** — on their own event page the host gets a **Members (N)** table with a row per guest, columns for every enabled registration field plus **Status**, Joined, a search box, **Export CSV**, and per-row **Edit**/**Remove** buttons. Pending requests also get **Approve**/**Reject**. The host can update any guest's details; a guest can update only their own.
 
-Events live in `gp_events_v2` and RSVPs in `gp_rsvps/{eventId}/rsvps/{uid}`. Each RSVP stores the guest's answers under `answers` (plus flat name/email/phone/college columns for the presets), and the event doc carries its own `formFields` list; older events fall back to the four default presets. Firestore Security Rules make public events and their RSVPs readable by anyone; a private event can be read only by a signed-in link-holder and never appears in a list query. Approval state (`status`, `passToken`, review stamps) is host-only. Only the signed-in member can **create** an RSVP (under their own uid); after that, either the event owner or that member can **update** or **delete** it (a member may edit their own details or resubmit a rejected request, but cannot approve themselves). Adding `?demo=1` to the homepage fills it with sample cards for UI preview — demo mode never writes to Firestore.
+Events live in `gp_events_v2` and RSVPs in `gp_rsvps/{eventId}/rsvps/{uid}`. Each RSVP stores the guest's answers under `answers` (plus flat name/email/phone/college columns for the presets), and the event doc carries its own `formFields` list; older events fall back to the four default presets. Firestore Security Rules make public events listable by anyone, but RSVPs themselves are readable only by the event owner and the guest who made them — the feed's names and counts come from a separate name-only public projection (`gp_members_public`). A private event can be read only by a signed-in link-holder and never appears in a list query. Approval state (`status`, `passToken`, review stamps) is host-only. Only the signed-in member can **create** an RSVP (under their own uid); after that, either the event owner or that member can **update** or **delete** it (a member may edit their own details or resubmit a rejected request, but cannot approve themselves). Adding `?demo=1` to the homepage fills it with sample cards for UI preview — demo mode never writes to Firestore.
 
-**The legacy routes still work:** `/gate/` (the scanner), `/p/#<token>` (a pass) and `/register/#/register/<eventId>` (fest registration) are unchanged and keep their own riso-poster styling. The original organiser dashboard module is still in the repo; the root `/` now serves the events homepage instead.
+**The legacy routes still work:** `/organiser/` (the organiser dashboard — sheet uploads, fests, WhatsApp delivery, Sheet sync, gate codes), `/gate/` (the scanner), `/p/#<token>` (a pass) and `/register/#/register/<eventId>` (fest registration) are unchanged and keep their own riso-poster styling. The root `/` serves the events homepage; the dashboard is linked from its nav as **Organiser**.
 
 ### Sharing, approval and QR passes
 
@@ -126,7 +126,8 @@ Event details, each attendee's name and the one contact column you choose (email
 ```
 index.html              events homepage (feed, calendar, discover, create, detail + RSVP)
 assets/js/events.js     events homepage routing and rendering
-assets/css/luma.css     charcoal/white homepage styling, scoped to body.luma
+assets/css/luma.css     riso-poster homepage styling (warm paper, blue + pink inks), scoped to body.luma
+organiser/index.html    the organiser dashboard, at organiser/
 p/index.html            the attendee's pass, at p/#<token>
 register/index.html     public Google-signed-in registration, at register/#/register/<eventId>
 gate/index.html         the gate scanner

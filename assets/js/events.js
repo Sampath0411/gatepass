@@ -225,6 +225,7 @@ function navHTML() {
           ${navLink("#/", "Events", "feed")}
           ${navLink("#/calendar", "Calendars", "calendar")}
           ${navLink("#/discover", "Discover", "discover")}
+          <a class="l-link" href="organiser/">${IX.pass}<span>Organiser</span></a>
         </nav>
       </div>
       <div class="l-nav-right">

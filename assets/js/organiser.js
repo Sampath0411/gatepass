@@ -42,7 +42,7 @@ function notConfigured() {
         <li>Enable Firestore and Google sign-in (see <b>SETUP.md</b>).</li>
         <li>Put your web config in <b>firebase-config.js</b>.</li>
       </ol>
-      <a class="btn" href="https://github.com/sampath0411" rel="noopener">Read the 5-step guide ${I.open}</a>
+      <a class="btn" href="https://github.com/Sampath0411/gatepass" rel="noopener">Read the 5-step guide ${I.open}</a>
     </section>`;
   view.querySelector("#art").style.backgroundImage = `url("${artUrl(0)}")`;
 }
@@ -104,8 +104,8 @@ function signInView(errMsg = "") {
         <button class="btn-primary compact" type="button" id="google"><span class="gdisc">${I.google}</span><span class="label">Continue with Google</span><span class="arrow">${I.arrow}</span></button>
         <p class="fine" style="margin:0">Organisers sign in with Google. Gate staff and attendees never need an account.</p>
         <div class="links" style="margin-top:8px">
-          <a href="gate/">${I.qr} Gate staff? Join with a code</a>
-          <a href="https://github.com/sampath0411" rel="noopener">${I.open} Host your own copy</a>
+          <a href="../gate/">${I.qr} Gate staff? Join with a code</a>
+          <a href="https://github.com/Sampath0411/gatepass" rel="noopener">${I.open} Host your own copy</a>
         </div>
       </div>
     </section>`;
@@ -469,7 +469,7 @@ function renderFestEvents(state) {
   const rows = state.events.slice()
     .sort((a, b) => String(a.starts_at || "").localeCompare(String(b.starts_at || "")))
     .map((e) => {
-      const link = `register/#/register/${encodeURIComponent(e.id)}`;
+      const link = `../register/#/register/${encodeURIComponent(e.id)}`;
       return `
     <li>
       <p class="pl-name">${escT(e.name)}</p>
