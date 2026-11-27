@@ -33,6 +33,7 @@ const state = {
   members: [],         // RSVP rows shown in the member directory
   memberQuery: "",
   myPass: null,        // { status, passToken } for the signed-in member (requestPass)
+  guestFlow: false,    // a guest-RSVP submit is mid-flight; onAuth must not re-route under it
 };
 let mountNode = null;
 let renderSeq = 0;
@@ -214,7 +215,7 @@ const navLink = (href, label, routeName) =>
   `<a class="l-link ${currentRoute() === routeName ? "is-active" : ""}" href="${href}">${IX[routeName === "calendar" ? "calendar" : routeName === "discover" ? "search" : "grid"]}<span>${label}</span></a>`;
 
 function navHTML() {
-  const label = state.user?.displayName || state.user?.email || "Your account";
+  const label = state.user?.isAnonymous ? "Guest" : state.user?.displayName || state.user?.email || "Your account";
   return `
   <header class="l-nav">
     <div class="l-nav-inner">
@@ -271,7 +272,7 @@ function toggleAccountMenu() {
   $(".l-account-menu", mountNode)?.remove();
   const menu = document.createElement("div");
   menu.className = "l-account-menu";
-  menu.innerHTML = `<div class="l-account-name">${esc(state.user?.displayName || state.user?.email || "Signed in")}</div>
+  menu.innerHTML = `<div class="l-account-name">${esc(state.user?.isAnonymous ? "Guest — no account" : state.user?.displayName || state.user?.email || "Signed in")}</div>
     <button type="button" data-action="signout">Sign out</button>`;
   $(".l-nav-right", mountNode)?.append(menu);
 }
@@ -711,7 +712,11 @@ function detailHTML(ev, rsvps, mine, owner, full, myPass) {
   const when = p ? `${p.when}${pe ? " → " + pe.time : ""}` : "Date to be announced";
   let cta;
   if (!state.user) {
-    cta = `<button class="l-google-btn l-block" data-action="signin">${I.google} Sign in to RSVP</button>`;
+    // Two ways in: Google (account, pass retrievable anywhere) or guest
+    // (no account — the pass link shown after RSVPing is the only copy).
+    cta = `<button class="l-google-btn l-block" data-action="signin-rsvp" data-id="${esc(ev.id)}">${I.google} Sign in to RSVP</button>
+      <button class="l-outline l-block" data-action="guest-rsvp" data-id="${esc(ev.id)}" ${full ? "disabled" : ""}>RSVP as guest</button>
+      <p class="l-guest-note">No account? RSVP as a guest — your pass link appears right here afterwards. Save it: without an account, it's the only copy.</p>`;
   } else if (owner) {
     cta = `<div class="l-owner-actions">
       <button class="l-primary l-block" data-action="edit" data-id="${esc(ev.id)}">${IX.edit} Edit event</button>
@@ -721,6 +726,7 @@ function detailHTML(ev, rsvps, mine, owner, full, myPass) {
   } else if (mine) {
     cta = `<div class="l-rsvp-actions">
       ${passStatusHTML(myPass)}
+      ${state.user?.isAnonymous ? `<p class="l-guest-note">You're RSVP'd as a guest on this device. Save your pass link — there's no account to recover it from later.</p>` : ""}
       <button class="l-primary l-block" data-action="edit-rsvp" data-id="${esc(ev.id)}">${IX.edit} Edit my details</button>
       <button class="l-outline l-block" data-action="cancel-rsvp" data-id="${esc(ev.id)}">Cancel RSVP</button>
     </div>`;
@@ -848,19 +854,37 @@ function rsvpInputHTML(field, existing) {
   return `<div class="l-modal-field"><label class="l-label" for="${id}">${label}${star}</label>
     <input ${common} type="${type}" autocomplete="${auto}" value="${value}"></div>`;
 }
-function openRsvpForm(ev, existing = null, ownerMode = false) {
+// Guests have no profile to prefill and no account to recover a pass from,
+// so name + email are always asked (and required) whatever the event's own
+// form configuration says; the event's other enabled fields ride along.
+function guestFields(ev) {
+  const fields = enabledFormFields(ev).map((f) => ({ ...f }));
+  for (const key of ["email", "name"]) {
+    if (!fields.some((f) => f.key === key)) {
+      fields.unshift({
+        key, label: key === "name" ? "Full name" : "Email",
+        type: key === "name" ? "text" : "email", required: true, enabled: true,
+      });
+    }
+  }
+  for (const f of fields) if (f.key === "name" || f.key === "email") f.required = true;
+  return fields;
+}
+function openRsvpForm(ev, existing = null, ownerMode = false, opts = {}) {
   closeRsvpForm();
-  const fields = enabledFormFields(ev);
+  const guest = !!opts.guest;
+  const fields = guest ? guestFields(ev) : enabledFormFields(ev);
   const overlay = document.createElement("div");
   overlay.className = "l-modal-overlay";
   overlay.innerHTML = `
     <div class="l-modal" role="dialog" aria-modal="true" aria-labelledby="l-rsvp-title">
       <div class="l-modal-head">
         <div>
-          <div class="l-eyebrow">${ownerMode ? "Guest details" : "RSVP"}</div>
+          <div class="l-eyebrow">${ownerMode ? "Guest details" : guest ? "RSVP as guest" : "RSVP"}</div>
           <h2 class="l-modal-title" id="l-rsvp-title">${ownerMode ? "Edit member" : esc(ev.title || "Event")}</h2>
           <p class="l-modal-sub">${ownerMode
             ? "Update the details stored for this guest."
+            : guest ? "No account needed. When you're done, your pass link appears on this page — save it, it's the only copy."
             : existing ? "Update your details for this event." : "Fill in your details to join this event."}</p>
         </div>
         <button type="button" class="l-modal-close" data-close-modal aria-label="Close">${IX.close}</button>
@@ -873,7 +897,7 @@ function openRsvpForm(ev, existing = null, ownerMode = false) {
         <p class="l-error l-modal-error" data-modal-error role="alert" hidden></p>
         <div class="l-actions l-modal-actions">
           <button type="button" class="l-cancel" data-close-modal>Cancel</button>
-          <button type="submit" class="l-primary">${ownerMode ? "Save changes" : "Submit RSVP"}${IX.arrow}</button>
+          <button type="submit" class="l-primary">${ownerMode ? "Save changes" : guest ? "Get my pass" : "Submit RSVP"}${IX.arrow}</button>
         </div>
       </form>
     </div>`;
@@ -938,6 +962,30 @@ function openRsvpForm(ev, existing = null, ownerMode = false) {
         // The next render re-reads through rsvpsFor(), which picks the source
         // allowed for this viewer (owner list vs. public projection).
         delete state.rsvps[ev.id];
+      } else if (guest) {
+        // Anonymous session + the normal RSVP write: the guest's pass is a
+        // real pass — the same records the gate scans and the dashboard
+        // lists. guestFlow keeps the auth listener from re-routing under
+        // the form when the anonymous sign-in lands mid-submit. If the
+        // project hasn't enabled anonymous sign-in, fail cleanly and point
+        // at Google instead of dying silently.
+        state.guestFlow = true;
+        try {
+          let gUser;
+          try {
+            gUser = await fb.signInGuest();
+          } catch (e) {
+            if (e?.code === "auth/operation-not-allowed" || e?.code === "auth/admin-restricted-operation") {
+              throw new Error("Guest RSVP isn't switched on for this site yet — please use “Sign in to RSVP” with Google instead.");
+            }
+            throw e;
+          }
+          state.user = gUser;
+          await fb.rsvpEvent(ev.id, gUser, answers);
+          delete state.rsvps[ev.id];
+        } finally {
+          state.guestFlow = false;
+        }
       } else {
         const u = await signedIn();
         if (!u) {
@@ -955,10 +1003,15 @@ function openRsvpForm(ev, existing = null, ownerMode = false) {
           state.myPass = pass;
           if (pass.status === "pending") message = existing ? "Request resubmitted — awaiting approval" : "Request sent — awaiting approval";
           else if (pass.status === "rejected") message = "Request wasn't approved";
+          else if (guest) message = "You're going! Save your pass link — it's the only copy.";
         } catch {}
       }
       toast(message, "check");
       await refreshEventView(ev.id);
+      // A guest session began during this submit: re-route once so the nav
+      // catches up (it still offers "Sign in" otherwise). The detail view
+      // above already shows the fresh pass.
+      if (guest && !DEMO) route();
     } catch (ex) {
       console.error(ex);
       showError(err, ex?.message || DB_MSG);
@@ -1174,6 +1227,25 @@ function copyGateLink() {
   toast("Gate link copied");
 }
 async function doRsvp(id) { await openRsvpFor(id); }
+// The event page's "Sign in to RSVP" button: sign in AND continue into the
+// RSVP form, so the click visibly completes the job its label promises.
+// (It previously used the bare header "signin" action, which only opened
+// the popup and left the visitor to find the RSVP button afterwards —
+// with the popup swallowed or closed, the button looked completely dead.)
+async function doSigninRsvp(id) {
+  const u = await signedIn();
+  if (!u) return;
+  await openRsvpFor(id);
+}
+// Guest RSVP: no account. The form collects name + email (phone optional),
+// then an anonymous session issues a real pass through the same machinery
+// as a Google RSVP — see the guest branch in openRsvpForm's submit.
+async function openGuestRsvp(id) {
+  let ev = DEMO ? demoEvents().find((e) => e.id === id) : (state.events || []).find((e) => e.id === id);
+  if (!ev && !DEMO) { try { ev = await fb.getV2Event(id); } catch {} }
+  if (!ev) return;
+  openRsvpForm(ev, null, false, { guest: true });
+}
 async function doCancelRsvp(id) {
   try {
     if (DEMO) {
@@ -1224,6 +1296,8 @@ function onClick(e) {
   if (!el || !mountNode.contains(el)) return;
   const a = el.dataset.action;
   if (a === "signin") { signedIn(); return; }
+  if (a === "signin-rsvp") { doSigninRsvp(el.dataset.id); return; }
+  if (a === "guest-rsvp") { openGuestRsvp(el.dataset.id); return; }
   if (a === "signout") { fb.signOutUser(); toast("Signed out", "check"); return; }
   if (a === "account") { toggleAccountMenu(); return; }
   if (a === "create") { createGate(); return; }
@@ -1303,7 +1377,10 @@ async function boot() {
   fb.onAuth((u) => {
     const changed = (u?.uid || null) !== (state.user?.uid || null);
     state.user = u;
-    if (changed && mountNode) route();
+    // During a guest RSVP the anonymous sign-in fires this too; re-routing
+    // here would tear down the open form mid-submit. The submit handler
+    // refreshes the view itself when it finishes.
+    if (changed && mountNode && !state.guestFlow) route();
   });
   window.addEventListener("hashchange", route);
   mountNode.addEventListener("click", onClick);

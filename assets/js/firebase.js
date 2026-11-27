@@ -1,7 +1,7 @@
 import { initializeApp } from "firebase/app";
 import {
   getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect,
-  getRedirectResult, signOut, onAuthStateChanged,
+  getRedirectResult, signOut, onAuthStateChanged, signInAnonymously,
 } from "firebase/auth";
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, addDoc, updateDoc,
@@ -52,6 +52,19 @@ export async function signIn() {
 }
 export const signOutUser = () => signOut(auth);
 export const redirectResult = () => getRedirectResult(auth);
+
+// Guest session: an anonymous Firebase Auth user. The rules key every member
+// grant off request.auth != null + uid equality (no provider checks), so a
+// guest rides the exact same RSVP/pass machinery as a Google member — the
+// uid is theirs alone, persists in this browser, and owns their pass token
+// doc. Requires Anonymous sign-in to be enabled in the Firebase console;
+// callers surface auth/operation-not-allowed as a clean "use Google" error.
+export async function signInGuest() {
+  if (auth.currentUser) return auth.currentUser;
+  const cred = await signInAnonymously(auth);
+  return cred.user;
+}
+export const isGuestUser = (u) => !!u?.isAnonymous;
 
 export async function listEvents(uid) {
   const snap = await getDocs(collection(db, "gp_users", uid, "events"));
@@ -153,21 +166,38 @@ export async function getPasses(eventId) {
     return {
       id: d.id, name: p.name, contact: p.contact || "", token: p.token,
       created_at: stamp(p.createdAt) || "",
+      wa_sent_at: stamp(p.waSentAt) || "",
     };
   });
+}
+
+// WhatsApp "marked sent" stamp for a legacy pass. Owner-only write (the
+// passes subcollection is the owner's), persisted on the pass record itself
+// so the count survives reloads — it records that the organiser opened the
+// wa.me draft, never that WhatsApp delivered anything.
+export async function markPassWaSent(eventId, passId) {
+  await updateDoc(doc(db, COL, eventId, "passes", passId), { waSentAt: serverTimestamp() });
+  return new Date().toISOString();
 }
 
 export async function generatePasses(eventId, rows, eventSnapshot) {
   // Never persist the gate code in a publicly readable pass document.
   const { gateCode, ...publicEvent } = eventSnapshot;
+  // One serverTimestamp() for the whole batch would stamp every pass with
+  // the same instant, leaving the dashboard's sort nothing but the name to
+  // order by (One, Three, Two). Client dates stepped 1ms per row keep the
+  // stored order identical to the sheet's row order.
+  const base = Date.now();
   for (let i = 0; i < rows.length; i += 160) {
     const batch = writeBatch(db);
-    for (const p of rows.slice(i, i + 160)) {
+    const chunk = rows.slice(i, i + 160);
+    for (let j = 0; j < chunk.length; j++) {
+      const p = chunk[j];
       const passId = doc(collection(db, COL, eventId, "passes")).id;
       const token = newToken();
       batch.set(doc(db, COL, eventId, "passes", passId), {
         name: p.name, contact: p.contact || "", token,
-        createdAt: serverTimestamp(), checkedInAt: null, gate: "",
+        createdAt: new Date(base + i + j), checkedInAt: null, gate: "",
       });
       batch.set(doc(db, PASS_PUB, token), {
         id: passId, eventId, name: p.name, event: publicEvent,
@@ -676,15 +706,22 @@ export async function syncEventTotals(festId, eventId) {
 export async function listRegistrations(festId) {
   const snap = await getDocs(collection(db, "gp_fests", festId, "registrations"));
   return snap.docs.map((d) => ({ id: d.id, ...d.data(), created_at: stamp(d.data().createdAt),
-    sheet_synced: !!d.data().sheetSynced }));
+    sheet_synced: !!d.data().sheetSynced, wa_sent_at: stamp(d.data().waSentAt) || "" }));
 }
 export async function markSheetSynced(festId, regId) {
   await updateDoc(doc(db, "gp_fests", festId, "registrations", regId), { sheetSynced: true });
 }
+// WhatsApp "marked sent" stamp on a fest registration (fest-owner write).
+// Like the pass markers, it records the wa.me draft being opened — the
+// organiser still taps Send in WhatsApp; nothing here claims delivery.
+export async function markRegWaSent(festId, regId) {
+  await updateDoc(doc(db, "gp_fests", festId, "registrations", regId), { waSentAt: serverTimestamp() });
+  return new Date().toISOString();
+}
 export function watchRegistrations(festId, cb) {
   return onSnapshot(collection(db, "gp_fests", festId, "registrations"), (snap) => {
     cb(snap.docs.map((d) => ({ id: d.id, ...d.data(), created_at: stamp(d.data().createdAt),
-      sheet_synced: !!d.data().sheetSynced })));
+      sheet_synced: !!d.data().sheetSynced, wa_sent_at: stamp(d.data().waSentAt) || "" })));
   });
 }
 
@@ -1099,18 +1136,41 @@ export async function getOrganiserPasses(eventId) {
   return rows.map((p) => ({
     id: p.id, name: p.name || "", contact: p.contact || "",
     token: p.token, created_at: p.created_at || "",
+    wa_sent_at: p.waSentAt || "",
   }));
+}
+
+// WhatsApp "marked sent" stamp for an organiser-issued v2 pass. The owner's
+// pass list rides on the createdEvents index doc (owner read/write), so the
+// marker is written back into that array entry — persisted across sessions,
+// and honest: it records the wa.me draft being opened, not delivery.
+export async function markOrganiserPassWaSent(eventId, passId) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error("Sign in required");
+  const ref = doc(db, "gp_users", uid, CREATED, eventId);
+  const s = await getDoc(ref);
+  if (!s.exists()) throw new Error("Event not found");
+  const at = new Date().toISOString();
+  const rows = (s.data().passes || []).map((p) =>
+    p.id === passId ? { ...p, waSentAt: at } : p);
+  await updateDoc(ref, { passes: rows });
+  return at;
 }
 
 export async function generatePassesV2(eventId, rows, { gateCode, publicEvent }) {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error("Sign in required");
   const indexRef = doc(db, "gp_users", uid, CREATED, eventId);
+  // created_at is stepped 1ms per row from one base: rows created inside the
+  // same millisecond would otherwise tie, and the dashboard's sort would fall
+  // back to name order (One, Three, Two) instead of the sheet's row order.
+  const base = Date.now();
   for (let i = 0; i < rows.length; i += 160) {
     const chunk = rows.slice(i, i + 160);
     const batch = writeBatch(db);
     const entries = [];
-    for (const p of chunk) {
+    for (let j = 0; j < chunk.length; j++) {
+      const p = chunk[j];
       const passId = doc(collection(db, PASS_PUB)).id;
       const token = newToken();
       // Same shape (and same restricted key set) as an RSVP-issued pass.
@@ -1124,7 +1184,7 @@ export async function generatePassesV2(eventId, rows, { gateCode, publicEvent })
       });
       entries.push({
         id: passId, name: p.name, contact: p.contact || "", token,
-        created_at: new Date().toISOString(),
+        created_at: new Date(base + i + j).toISOString(),
       });
     }
     batch.update(doc(db, GATES, gateCode), { total: increment(chunk.length) });

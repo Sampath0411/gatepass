@@ -15,7 +15,7 @@ store.set("gp.device", S.device);
 paintIcons();
 $("findBtn").innerHTML = I.search;
 $("photoLbl").innerHTML = I.camera;
-document.querySelectorAll(".fine").forEach((p) => { p.innerHTML = p.innerHTML.replace("${search}", `<span style="display:inline-block;width:16px;height:16px;vertical-align:-3px">${I.search}</span>`).replace("${camera}", `<span style="display:inline-block;width:16px;height:16px;vertical-align:-3px">${I.camera}</span>`); });
+document.querySelectorAll(".fine").forEach((p) => { p.innerHTML = p.innerHTML.replace("${search}", `<span class="hint-ico">${I.search}</span>`).replace("${camera}", `<span class="hint-ico">${I.camera}</span>`); });
 
 // ── sound + buzz (unlocked on the first tap) ──
 let ac;
@@ -97,6 +97,11 @@ function showResult(r) {
 
 async function scanToken(token) {
   S.busy = true;
+  // Immediate pending state: a check-in round-trip can take seconds, and a
+  // silent scanner reads as a dead scanner (live test, 27 Nov 2026). Every
+  // check-in path — camera, photo, find-by-name, manual entry — funnels
+  // through here or admitById below, and all of them show this first.
+  verdict("idle", "Checking…", "Confirming this pass with the gate list.");
   try {
     const r = await fb.scanToken(S.code, token, S.gate, S.device);
     if (r.status === "bad_code") { sounds.warn(); return leave("The organiser changed this gate's code. Ask them for the new one."); }
@@ -249,6 +254,7 @@ function openFind() {
     if (!b) return;
     b.disabled = true;
     close();
+    verdict("idle", "Checking…", "Confirming this guest's pass.");
     try {
       const r = await fb.admitById(S.code, b.dataset.id, S.gate, S.device);
       if (r.status === "bad_code") { sounds.warn(); leave("The organiser changed this gate's code. Ask them for the new one."); }
@@ -286,7 +292,11 @@ function showScanner() {
 
 async function join(code, gate, { auto = false } = {}) {
   const btn = $("joinBtn");
+  const label = btn.querySelector(".label");
   btn.disabled = true;
+  // Visible feedback while the code validates — a greyed button with its
+  // original label and no other sign of life reads as a hang.
+  if (label) label.textContent = "Checking code…";
   try {
     const ev = await fb.joinGate(code);
     if (!ev) { if (auto) store.del("gp.gate"); return showJoin(auto ? "" : "No event has that code. Check it with the organiser; they may have made a new one."); }
@@ -300,8 +310,30 @@ async function join(code, gate, { auto = false } = {}) {
     showJoin(isOffline(e) ? "No connection. Connect and try again." : e.message);
   } finally {
     btn.disabled = false;
+    if (label) label.textContent = "Open scanner";
   }
 }
+
+// ── manual pass entry ──
+// No camera, no photo, name not found: staff paste the guest's pass link
+// (or the bare token from it) and the pass goes through the exact same
+// claim path and verdicts as a scanned QR.
+$("manualForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const input = $("manualInput"), err = $("manualErr");
+  const token = tokenFrom(input.value);
+  if (!token) {
+    err.textContent = "That doesn't look like a pass link or code. Paste the guest's whole pass link.";
+    err.hidden = false;
+    input.focus();
+    return;
+  }
+  err.hidden = true;
+  if (S.busy) return;
+  S.last.token = null;   // a deliberate manual entry always re-checks, even a repeat
+  await scanToken(token);
+  input.value = "";
+});
 
 const codeIn = $("code");
 codeIn.addEventListener("input", () => {

@@ -155,10 +155,20 @@ service cloud.firestore {
       // token-holder flip checkedInAt/gate on their own pass, faking a
       // check-in on the pass page. The scan transaction no longer writes
       // this stamp either — the one-shot claim doc is the only authority
-      // for "checked in". The pass page therefore no longer shows an
-      // "Already used" stamp from scans; the gate still blocks repeats.
+      // for "checked in". The gate still blocks every repeat scan.
       allow update: if isOwner(resource.data.eventId);
       allow delete: if isOwner(resource.data.eventId);
+      // V2 stamp mirror: isOwner() above resolves through gp_events, which
+      // a v2 event has no doc in, so without this grant NOBODY could ever
+      // stamp a v2 pass and its pass page could never show "Checked in"
+      // (found in the 27 Nov 2026 live test). The v2 event's owner may
+      // mirror the authoritative claim onto the pass doc — restricted to
+      // exactly the two stamp fields, so no identity field can be rewritten
+      // through this grant. The organiser dashboard performs this mirror
+      // from the claim docs while it is open (stampPassesFromClaims).
+      allow update: if isOwnerEventV2(resource.data.eventId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['checkedInAt', 'gate']);
       // V2 events are not under gp_events, so the legacy owner grant above
       // cannot match them. The owner may revoke a pass while the event exists.
       allow delete: if isOwnerEventV2(resource.data.eventId);

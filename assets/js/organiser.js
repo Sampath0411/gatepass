@@ -31,6 +31,19 @@ function withTimeout(p, ms = 12000) {
   ]);
 }
 
+// Disable a submit button WITH visible feedback while its write is in
+// flight. A greyed-out button that still reads "Create event" looks broken
+// (live test, 27 Nov 2026); swap its label for a working state and hand
+// back a restore function for the error path.
+function setBtnBusy(btn, text) {
+  if (!btn) return () => {};
+  const label = btn.querySelector(".label");
+  const orig = label?.textContent;
+  btn.disabled = true;
+  if (label) label.textContent = text;
+  return () => { btn.disabled = false; if (label) label.textContent = orig; };
+}
+
 // ─────────────────────────────────────────────── boot
 
 function notConfigured() {
@@ -234,7 +247,7 @@ async function eventForm(id = null) {
     if (!name) { err.textContent = "Give the event a name."; err.hidden = false; return form.name.focus(); }
     if (isNaN(starts)) { err.textContent = "Pick a date and time."; err.hidden = false; return; }
     const row = { name, club: String(f.get("club")).trim(), venue: String(f.get("venue")).trim(), art: Number(f.get("art") || 0), starts_at: starts.toISOString() };
-    const btn = view.querySelector("#saveBtn"); btn.disabled = true;
+    const restoreBtn = setBtnBusy(view.querySelector("#saveBtn"), id ? "Saving…" : "Creating…");
     let data;
     try {
       if (id) {
@@ -244,14 +257,13 @@ async function eventForm(id = null) {
         data = { id: await withTimeout(fb.createEvent(row)) };
       }
     } catch (e) {
-      btn.disabled = false;
+      restoreBtn();
       err.textContent = e.code === "permission-denied"
         ? "Permission denied. Publish firestore.rules from this project in the Firebase console (see SETUP.md), then try again."
         : e.message;
       err.hidden = false;
       return;
     }
-    btn.disabled = false;
     location.hash = `#/e/${data.id}`;
   });
 }
@@ -303,7 +315,7 @@ async function v2EventForm() {
     if (isNaN(starts)) { err.textContent = "Pick a date and time."; err.hidden = false; return; }
     const ends = new Date(starts.getTime() + 3 * 3600e3);
     const art = Number(f.get("art") || 0);
-    const btn = view.querySelector("#saveBtn"); btn.disabled = true;
+    const restoreBtn = setBtnBusy(view.querySelector("#saveBtn"), "Creating…");
     let id;
     try {
       id = await withTimeout(fb.createV2Event({
@@ -314,7 +326,7 @@ async function v2EventForm() {
         visibility: String(f.get("visibility")) === "private" ? "private" : "public",
       }));
     } catch (e2) {
-      btn.disabled = false;
+      restoreBtn();
       err.textContent = e2.code === "permission-denied"
         ? "Permission denied. Publish firestore.rules from this project in the Firebase console (see SETUP.md), then try again."
         : e2.message;
@@ -383,7 +395,7 @@ function festForm() {
     const starts = new Date(`${f.get("date")}T18:00`);
     if (!name) { err.textContent = "Give the fest a name."; err.hidden = false; return form.elements.name.focus(); }
     if (isNaN(starts)) { err.textContent = "Pick a date for the fest."; err.hidden = false; return; }
-    const btn = view.querySelector("#saveFest"); btn.disabled = true;
+    const restoreBtn = setBtnBusy(view.querySelector("#saveFest"), "Creating…");
     try {
       const id = await withTimeout(fb.createFest({
         name, club: String(f.get("club")).trim(), venue: String(f.get("venue")).trim(),
@@ -391,7 +403,7 @@ function festForm() {
       }));
       location.hash = `#/fest/${id}`;
     } catch (e2) {
-      btn.disabled = false;
+      restoreBtn();
       err.textContent = e2.message;
       err.hidden = false;
     }
@@ -432,6 +444,11 @@ async function festView(id) {
   regUnsub = fb.watchRegistrations(fest.id, (rows) => {
     if (!state.alive) return;
     state.regs = rows;
+    // WhatsApp "marked sent" markers live on the registration docs, so they
+    // survive reloads. Merge additively: a marker written moments ago may
+    // still show a pending server timestamp in this snapshot, and a local
+    // mark must never flicker back off.
+    for (const r of rows) if (r.wa_sent_at) state.waSent.add(r.id);
     renderFestRegs(state);
     loadFestClaims(state);
     syncFestSheet(state);
@@ -463,6 +480,16 @@ async function loadFestClaims(state) {
     } catch { if (!state.claimsByEvent.has(e.id)) state.claimsByEvent.set(e.id, new Map()); }
   }));
   if (!state.alive) return;
+  // Mirror the claims onto the fest pass docs (owner write): a fest pass
+  // page reads its "Checked in" stamp from gp_passes, and gate scans can't
+  // write it — the same fix as the event dashboard's mirror in startLive.
+  if (state.regs.length) {
+    const passes = state.regs.filter((r) => r.passId && r.token)
+      .map((r) => ({ id: r.passId, token: r.token }));
+    const claims = [...state.claimsByEvent.values()]
+      .flatMap((m) => [...m.entries()].map(([pass_id, c]) => ({ pass_id, scanned_at: c.scanned_at, gate: c.gate })));
+    if (passes.length && claims.length) fb.stampPassesFromClaims(passes, claims).catch(() => {});
+  }
   renderFestEvents(state);
   renderFestRegs(state);
 }
@@ -672,7 +699,7 @@ function renderFestRegs(state) {
       <td>${esc(r.name)}</td>
       <td>${esc(r.email || "—")}</td>
       <td>${esc(r.phone || "—")}</td>
-      <td><a href="${esc(passUrl(r.token))}" target="_blank" rel="noopener">Open pass</a>${wa ? ` · <a href="https://wa.me/${wa}?text=${encodeURIComponent(festMsg(state, r))}" target="_blank" rel="noopener">WhatsApp</a>` : ""}</td>
+      <td><a href="${esc(passUrl(r.token))}" target="_blank" rel="noopener">Open pass</a>${wa ? ` · <a href="https://wa.me/${wa}?text=${encodeURIComponent(festMsg(state, r))}" target="_blank" rel="noopener" data-wa-reg="${esc(r.id)}">WhatsApp</a>` : ""}</td>
       <td>${claim ? `<span class="in">In ${esc(fmtTime(claim.scanned_at))} · ${esc(claim.gate)}</span>` : "—"}</td>
       <td>${r.sheet_synced ? "Synced" : "Pending"}</td>
     </tr>`;
@@ -682,7 +709,7 @@ function renderFestRegs(state) {
     <div class="tools"><button class="btn small" type="button" id="regsCsv">${I.download}Export CSV</button></div>
     ${rows.length ? `
     <div class="stack" style="gap:8px">
-      <p class="fine" style="margin:0"><b>WhatsApp delivery</b> — ${waRows.length} of ${rows.length} registrations have a phone number. Each tap opens one WhatsApp chat with that person's pass already written in — you tap Send. Nothing is sent automatically.</p>
+      <p class="fine" style="margin:0"><b>WhatsApp delivery</b> — ${waRows.length} of ${rows.length} registrations have a phone number. Each tap opens one WhatsApp chat with that person's pass already written in — you tap Send. Nothing is sent automatically. Each tap is marked on the pass, so the count survives reloads.</p>
       <div class="btns">
         <button class="btn small" type="button" id="festWaNext">${I.chat}Send next on WhatsApp</button>
         <button class="btn small" type="button" id="festWaCopy">${I.copy}Copy all WhatsApp messages</button>
@@ -718,18 +745,36 @@ function renderFestRegs(state) {
     }
     const next = waRows.find((r) => !state.waSent.has(r.id));
     statusEl.textContent = done >= total
-      ? `All ${total} WhatsApp passes opened. Reopen any row's WhatsApp link to resend one.`
-      : `${done} of ${total} sent this session — next: ${next.name}.`;
+      ? `All ${total} marked as sent. Reopen any row's WhatsApp link to resend one.`
+      : `${done} of ${total} marked as sent — next: ${next.name}.`;
     nextBtn.disabled = done >= total;
+  };
+  // Marking persists waSentAt on the registration doc (fest-owner write), so
+  // the count survives reloads; it records the wa.me draft being opened, not
+  // delivery — the organiser still taps Send inside WhatsApp.
+  const markReg = (r) => {
+    if (!r || state.waSent.has(r.id)) return;
+    state.waSent.add(r.id);
+    r.wa_sent_at = new Date().toISOString();
+    waStatus();
+    fb.markRegWaSent(state.fest.id, r.id).catch(() => {
+      state.waSent.delete(r.id);
+      toast("Couldn't save the sent marker — count rolled back", "x");
+      waStatus();
+    });
   };
   box.querySelector("#festWaNext").onclick = () => {
     const next = waRows.find((r) => !state.waSent.has(r.id));
     if (!next) return waStatus();
     const d = normalizePhone(next.phone);
-    state.waSent.add(next.id);
     if (d) window.open(`https://wa.me/${d}?text=${encodeURIComponent(festMsg(state, next))}`, "_blank", "noopener");
-    waStatus();
+    markReg(next);
   };
+  box.querySelectorAll("[data-wa-reg]").forEach((a) => a.addEventListener("click", () => {
+    // Let the anchor open the draft first; mark on the next tick.
+    const r = state.regs.find((x) => x.id === a.dataset.waReg);
+    setTimeout(() => markReg(r), 0);
+  }));
   box.querySelector("#festWaCopy").onclick = async () => {
     const text = waRows.map((r) => festMsg(state, r)).join("\n\n");
     (await copyText(text)) ? toast(`${plural(waRows.length, "WhatsApp message")} copied`) : toast("Couldn't copy", "x");
@@ -765,6 +810,7 @@ async function eventView(id) {
     canRotate: true, editHref: `#/e/${id}/edit`,
     genBatch: (rows) => fb.generatePasses(id, rows, { name: ev.name, club: ev.club, starts_at: ev.starts_at, venue: ev.venue, art: ev.art, gateCode: ev.gate_code }),
     reloadPasses: () => fb.getPasses(id),
+    markWaSent: (p) => fb.markPassWaSent(id, p.id),
     removeEvent: () => fb.deleteEvent(id),
   });
 }
@@ -793,6 +839,7 @@ async function loadV2State(v2) {
     canRotate: false, editHref: `../#/create/${v2.id}`,
     genBatch: (rows) => fb.generatePassesV2(v2.id, rows, { gateCode: ev.gate_code, publicEvent }),
     reloadPasses: () => fb.getOrganiserPasses(v2.id),
+    markWaSent: (p) => fb.markOrganiserPassWaSent(v2.id, p.id),
     removeEvent: async () => {
       const current = await fb.getOrganiserPasses(v2.id);
       await fb.deleteOrganiserPasses(current);
@@ -801,12 +848,15 @@ async function loadV2State(v2) {
   };
 }
 
-function eventDashboard({ kind, ev, passes, gate, claims, canRotate, editHref, genBatch, reloadPasses, removeEvent }) {
+function eventDashboard({ kind, ev, passes, gate, claims, canRotate, editHref, genBatch, reloadPasses, removeEvent, markWaSent }) {
   const id = ev.id;
-  passes.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.name.localeCompare(b.name));
+  // Creation order ONLY: generation stamps each pass 1ms apart precisely so
+  // this sort reproduces the sheet's row order. A name tiebreak here used to
+  // scramble same-millisecond passes into One, Three, Two.
+  passes.sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
   // Only bounced comes from the staff-writable gate doc; the checked count and
   // per-pass stamps come from immutable claim docs.
-  const state = { kind, ev, passes, first: new Map(), bounced: gate?.counts.bounced ?? 0, checked: 0, upload: null, filter: "", shown: 120, waSent: new Set(), sheet: null, stamped: new Set(), canRotate, editHref, genBatch, reloadPasses, removeEvent };
+  const state = { kind, ev, passes, first: new Map(), bounced: gate?.counts.bounced ?? 0, checked: 0, upload: null, filter: "", shown: 120, waSent: new Set(passes.filter((p) => p.wa_sent_at).map((p) => p.id)), sheet: null, stamped: new Set(), canRotate, editHref, genBatch, reloadPasses, removeEvent, markWaSent };
   // The gate total counts every pass on the gate (RSVPs + sheet-issued);
   // this dashboard's own list may hold only the sheet-issued ones.
   state.total = gate?.counts.total ?? passes.length;
@@ -1024,7 +1074,11 @@ async function generate(state) {
   else toast(`${plural(done, "pass", "passes")} ready`);
   try {
     state.passes = await withTimeout(state.reloadPasses());
-    state.passes.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.name.localeCompare(b.name));
+    // Creation order only (stable sort keeps the stored order on ties) —
+    // never a name tiebreak: that scrambled a fresh batch into One, Three, Two.
+    state.passes.sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+    // Newly generated passes start unmarked; keep any markers already stored.
+    state.waSent = new Set(state.passes.filter((p) => p.wa_sent_at).map((p) => p.id));
     const gate = await withTimeout(fb.joinGate(state.ev.gate_code));
     if (gate) state.total = gate.counts.total;
   } catch {}
@@ -1050,7 +1104,7 @@ function renderGate(state, showQr = false) {
   el.innerHTML = `
     <p class="kicker-free">Gate code</p>
     <p class="gate-code ink" aria-label="Gate code ${fmtCode(ev.gate_code).split("").join(" ")}">${fmtCode(ev.gate_code)}</p>
-    <p class="fine">Staff open <b>${esc(gateUrl("").replace(/#$/, "").replace(/^https?:\/\//, ""))}</b> and type this. Anyone with the code can scan, so share it only with your team.</p>
+    <p class="fine">Staff open&nbsp;<b>${esc(gateUrl("").replace(/#$/, "").replace(/^https?:\/\//, ""))}</b>&nbsp;and type this. Anyone with the code can scan, so share it only with your team.</p>
     <div class="btns">
       <button class="btn small" type="button" id="cpGate">${I.link}Copy gate link</button>
       <button class="btn small" type="button" id="qrGate" aria-expanded="${showQr}">${I.qr}${showQr ? "Hide QR" : "Show QR"}</button>
@@ -1099,6 +1153,26 @@ function waPasses(state) {
   return state.passes.filter((p) => isPhone(p.contact || ""));
 }
 
+// Record a WhatsApp tap on the pass itself (waSentAt, via state.markWaSent)
+// so the "marked sent" count is honest and survives reloads — it used to be
+// a session-only Set that reset on every reload. Optimistic in the UI; if
+// the write fails, the marker rolls back and the organiser hears about it.
+// The marker means "the wa.me draft was opened": the organiser still taps
+// Send inside WhatsApp, and GatePass never claims delivery.
+function noteWaSent(state, p, refresh) {
+  if (!p || state.waSent.has(p.id)) { refresh?.(); return; }
+  state.waSent.add(p.id);
+  const prev = p.wa_sent_at;
+  p.wa_sent_at = new Date().toISOString();
+  refresh?.();
+  Promise.resolve(state.markWaSent?.(p)).catch(() => {
+    state.waSent.delete(p.id);
+    p.wa_sent_at = prev;
+    refresh?.();
+    toast("Couldn't save the sent marker — count rolled back", "x");
+  });
+}
+
 function renderPassTools(state) {
   const el = view.querySelector("#passTools");
   view.querySelector("#pcount").textContent = state.passes.length ? plural(state.passes.length, "pass", "passes") : "";
@@ -1113,12 +1187,12 @@ function renderPassTools(state) {
     </div>
     <p class="fine" style="margin:0">GatePass sends nothing itself. Send each link yourself on WhatsApp or email; every link opens that person's pass.</p>
     <div class="stack" id="waBox" style="gap:8px">
-      <p class="fine" style="margin:0"><b>WhatsApp delivery</b> — ${waPasses(state).length} of ${state.passes.length} passes have a phone number${state.passes.length - waPasses(state).length ? `; ${state.passes.length - waPasses(state).length} have no phone — use Email or Copy link for those` : ""}. Each tap opens one WhatsApp chat with that person's pass already written in — you tap Send. Nothing is sent automatically.</p>
+      <p class="fine" style="margin:0"><b>WhatsApp delivery</b> — ${waPasses(state).length} of ${state.passes.length} passes have a phone number${state.passes.length - waPasses(state).length ? `; ${state.passes.length - waPasses(state).length} have no phone — use Email or Copy link for those` : ""}. Each tap opens one WhatsApp chat with that person's pass already written in — you tap Send. Nothing is sent automatically. Each tap is marked on the pass, so the count survives reloads.</p>
       <div class="btns">
         <button class="btn small" type="button" id="waNext">${I.chat}Send next on WhatsApp</button>
         <button class="btn small" type="button" id="waCopyAll">${I.copy}Copy all WhatsApp messages</button>
       </div>
-      <p class="fine" id="waStatus" style="margin:0">${state.waSent.size ? `${state.waSent.size} sent this session` : "Not started yet — the first tap opens the first phone number on the list."}</p>
+      <p class="fine" id="waStatus" style="margin:0">${state.waSent.size ? `${state.waSent.size} marked as sent` : "Not started yet — the first tap opens the first phone number on the list."}</p>
     </div>
     <div class="search"><span>${I.search}</span><input class="input" id="filter" placeholder="Search names" autocomplete="off" value="${esc(state.filter)}"></div>`;
   el.querySelector("#cpAll").addEventListener("click", async () => {
@@ -1134,8 +1208,9 @@ function renderPassTools(state) {
     download(`${slug}-passes.csv`, toCsv(rows));
   });
   // WhatsApp delivery queue: one tap opens one chat (a real user gesture, so
-  // the browser won't block it). Sent rows are ticked off for this session
-  // only — nothing is stored, and GatePass never sends a message by itself.
+  // the browser won't block it). Each tap is marked on the pass itself
+  // (waSentAt), so the count survives reloads; "marked as sent" means the
+  // draft was opened — GatePass never sends a message by itself.
   const waStatus = () => {
     const done = state.waSent.size, total = waPasses(state).length;
     const statusEl = el.querySelector("#waStatus");
@@ -1145,20 +1220,20 @@ function renderPassTools(state) {
       nextBtn.disabled = true;
       return;
     }
-    const next = waPasses(state).find((p) => !state.waSent.has(p.id));
+    const next = waPasses(state).find((p) => !state.waSent.has(p.id) && sendHref(state, p)?.href);
     statusEl.textContent = done >= total
-      ? `All ${total} WhatsApp passes opened. Reopen any row's WhatsApp button to resend one.`
-      : `${done} of ${total} sent this session — next: ${next.name}.`;
-    nextBtn.disabled = done >= total;
+      ? `All ${total} marked as sent. Reopen any row's WhatsApp button to resend one.`
+      : next
+        ? `${done} of ${total} marked as sent — next: ${next.name}.`
+        : `${done} of ${total} marked as sent — the rest have numbers WhatsApp can't open; use Email or Copy link for those.`;
+    nextBtn.disabled = !next;
   };
+  state.refreshWa = waStatus;
   el.querySelector("#waNext").addEventListener("click", () => {
-    const next = waPasses(state).find((p) => !state.waSent.has(p.id));
+    const next = waPasses(state).find((p) => !state.waSent.has(p.id) && sendHref(state, p)?.href);
     if (!next) return waStatus();
-    const send = sendHref(state, next);
-    if (!send?.href) { state.waSent.add(next.id); return waStatus(); }
-    state.waSent.add(next.id);
-    window.open(send.href, "_blank", "noopener");
-    waStatus();
+    window.open(sendHref(state, next).href, "_blank", "noopener");
+    noteWaSent(state, next, waStatus);
   });
   el.querySelector("#waCopyAll").addEventListener("click", async () => {
     const text = waPasses(state).map((p) => msgFor(state, p)).join("\n\n");
@@ -1175,11 +1250,11 @@ function rowHtml(state, p) {
   return `
     <li data-id="${p.id}">
       <p class="pl-name">${esc(p.name)}</p>
-      <p class="pl-meta">${s ? `<span class="in">In ${esc(fmtTime(s.scanned_at))} · ${esc(s.gate)}</span> · ` : ""}${esc(p.contact || "no contact")}</p>
+      <p class="pl-meta">${s ? `<span class="in">In ${esc(fmtTime(s.scanned_at))} · ${esc(s.gate)}</span> · ` : ""}${esc(p.contact || "no contact")}${state.waSent.has(p.id) ? ` · WhatsApp marked sent` : ""}</p>
       <div class="pl-actions">
         ${send ? (send.email
           ? `<button class="icon-btn" type="button" data-email="${esc(p.token)}" aria-label="Email ${esc(p.name)} their pass photo" title="Email pass photo">${send.icon}</button>`
-          : `<a class="icon-btn" href="${esc(send.href)}" target="_blank" rel="noopener" aria-label="${send.label} ${esc(p.name)} their pass" title="${send.label}">${send.icon}</a>`) : ""}
+          : `<a class="icon-btn" href="${esc(send.href)}" target="_blank" rel="noopener" data-wa="${esc(p.id)}" aria-label="${send.label} ${esc(p.name)} their pass" title="${send.label}">${send.icon}</a>`) : ""}
         <button class="icon-btn" type="button" data-image="${esc(p.token)}" aria-label="Share ${esc(p.name)}'s pass photo" title="Share pass photo">${I.image}</button>
         <button class="icon-btn" type="button" data-copy="${esc(p.token)}" aria-label="Copy ${esc(p.name)}'s pass link" title="Copy link">${I.copy}</button>
         <a class="icon-btn" href="${esc(passUrl(p.token))}" target="_blank" rel="noopener" aria-label="Open ${esc(p.name)}'s pass" title="Open pass">${I.open}</a>
@@ -1196,6 +1271,14 @@ function renderList(state) {
   more.innerHTML = list.length > state.shown ? `<button class="btn small" type="button" id="moreBtn">Show ${Math.min(240, list.length - state.shown)} more of ${list.length - state.shown}</button>` : "";
   more.querySelector("#moreBtn")?.addEventListener("click", () => { state.shown += 240; renderList(state); });
   ul.onclick = async (e) => {
+    const wa = e.target.closest("[data-wa]");
+    if (wa) {
+      // Don't preventDefault: the anchor still opens the WhatsApp draft.
+      // Mark the pass as sent (persisted), then refresh the row + counter
+      // after the click's default action has had its turn.
+      const p = state.passes.find((x) => x.id === wa.dataset.wa);
+      if (p) setTimeout(() => noteWaSent(state, p, () => { state.refreshWa?.(); renderList(state); }), 0);
+    }
     const mail = e.target.closest("[data-email]");
     if (mail) {
       const p = state.passes.find((x) => x.token === mail.dataset.email);
@@ -1282,17 +1365,20 @@ function startLive(state) {
         state.bounced = lastBounced;
         renderStat(state, state.checked !== prevChecked || state.bounced !== prevBounced);
         renderList(state);
-        // Legacy events only: mirror new claims onto the pass docs (an
-        // owner-only write) so those pass pages show "Checked in" under the
-        // hardened rules, where gate scans no longer stamp the pass doc.
-        // v2 passes rely on the gate's own best-effort stamp at scan time.
-        if (state.kind === "v1") {
-          const fresh = claims.filter((c) => c.is_first && !state.stamped.has(c.pass_id));
-          if (fresh.length) {
-            fb.stampPassesFromClaims(state.passes, fresh)
-              .then(() => fresh.forEach((c) => state.stamped.add(c.pass_id)))
-              .catch(() => {});
-          }
+        // Mirror new claims onto the pass docs (an owner-only write) so the
+        // pass pages show "Checked in" under the hardened rules, where gate
+        // scans no longer stamp the pass doc themselves. This must run for
+        // BOTH event kinds: v2 passes previously "relied on" the gate's
+        // best-effort stamp, but gate staff are signed out and the rules
+        // deny that write — so a scanned v2 pass page NEVER updated (live
+        // test, 27 Nov 2026). The claim stays the only scan authority; this
+        // is purely its attendee-visible mirror. (For v2 the write needs
+        // the stamp grant in firestore.rules — see the gp_passes match.)
+        const fresh = claims.filter((c) => c.is_first && !state.stamped.has(c.pass_id));
+        if (fresh.length) {
+          fb.stampPassesFromClaims(state.passes, fresh)
+            .then(() => fresh.forEach((c) => state.stamped.add(c.pass_id)))
+            .catch(() => {});
         }
       } while (again);
     } finally {

@@ -102,7 +102,15 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       <div class="bar"><i id="cBar"></i></div>
     </div>
 
-    <p class="fine" style="margin:10px 0 0">Dead phone or cracked screen? Tap ${search} on the camera to find a guest by name. Camera won't start? Tap ${camera} to scan a photo.</p>
+    <p class="fine gate-help" style="margin:10px 0 0">Dead phone or cracked screen? Tap&nbsp;${search}&nbsp;on the camera to find a guest by name. Camera won't start? Tap&nbsp;${camera}&nbsp;to scan a photo.</p>
+
+    <form id="manualForm" class="manual-entry" novalidate>
+      <label class="field"><span>Pass link or code</span>
+        <input class="input" id="manualInput" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste a pass link, or the code from their pass">
+      </label>
+      <p class="err" id="manualErr" role="alert" hidden></p>
+      <button class="btn" type="submit" id="manualBtn">Check in this pass</button>
+    </form>
 
     <h2 class="head section-gap" style="font-size:20px">Last scans</h2>
     <ul class="recent" id="recent"></ul>
