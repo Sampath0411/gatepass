@@ -684,7 +684,10 @@ function passStatusHTML(pass) {
   }
   if (pass.passToken) {
     const url = passUrl(pass.passToken);
-    return `<a class="l-pass-link" href="${esc(url)}" target="_blank" rel="noopener">
+    const checked = pass.checkedInAt
+      ? `<div class="l-status-banner is-approved">${I.check}<span>Checked in · ${esc(fmtTime(pass.checkedInAt))}${pass.checkedGate ? ` · ${esc(pass.checkedGate)}` : ""}</span></div>`
+      : "";
+    return `${checked}<a class="l-pass-link" href="${esc(url)}" target="_blank" rel="noopener">
       ${IX.pass}<span>Open my pass</span>${IX.arrow}</a>
     <div class="l-qr-card">
       <div class="l-qr-frame">${qrSvg(url, { fg: "#12121C", margin: 2 })}</div>
@@ -712,6 +715,7 @@ function detailHTML(ev, rsvps, mine, owner, full, myPass) {
   } else if (owner) {
     cta = `<div class="l-owner-actions">
       <button class="l-primary l-block" data-action="edit" data-id="${esc(ev.id)}">${IX.edit} Edit event</button>
+      <a class="l-outline l-block" href="organiser/#/e/${esc(ev.id)}">${IX.pass} Passes &amp; gate tools</a>
       <button class="l-danger l-block" data-action="delete" data-id="${esc(ev.id)}">${I.trash} Delete event</button>
     </div>`;
   } else if (mine) {
@@ -781,6 +785,16 @@ async function renderEvent(id, seq) {
     } else {
       try { myPass = await fb.requestPass(id); }
       catch (e) { console.warn("requestPass failed", e); }
+      // If the gate has already scanned this member in, say so right here —
+      // the stamp lives on the public pass doc, readable with the token.
+      if (myPass?.passToken) {
+        try {
+          const pub = await fb.getPassByToken(myPass.passToken);
+          if (pub?.checked_in_at) {
+            myPass = { ...myPass, checkedInAt: pub.checked_in_at, checkedGate: pub.gate || "" };
+          }
+        } catch (e) { console.warn("pass stamp check failed", e); }
+      }
     }
   }
   if (renderSeq !== seq) return;

@@ -111,6 +111,18 @@ html { scrollbar-color: var(--blue) transparent; scrollbar-width: thin; }
 .mast-center { justify-content: center; position: relative; }
 .mast-center .logo { font-size: 30px; }
 
+/* Shared site nav: the same sections, in the same order, on every page that
+   carries it — the events site and the organiser dashboard are one website. */
+.sitenav {
+  display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: center;
+  padding: 0 0 12px; margin-bottom: 18px;
+  border-bottom: 2px dotted var(--pink);
+  font: 600 13px/1 var(--f-display); letter-spacing: .12em; text-transform: uppercase;
+}
+.sitenav a { color: var(--blue-soft); text-decoration: none; padding: 4px 0; }
+.sitenav a:hover { color: var(--pink-ink); }
+.sitenav a[aria-current="page"] { color: var(--pink-ink); }
+
 .scallops {
   height: 16px; margin-top: auto; flex: none;
   background: radial-gradient(circle at 50% 100%, var(--pink) 0 8px, transparent 8.5px) 3px 0 / 24px 16px repeat-x;

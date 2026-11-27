@@ -6,7 +6,7 @@ import {
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, addDoc, updateDoc,
   collection, query, where, orderBy, limit, writeBatch, runTransaction,
-  serverTimestamp, increment, onSnapshot,
+  arrayUnion, serverTimestamp, increment, onSnapshot,
 } from "firebase/firestore";
 
 const cfg = window.FIREBASE || {};
@@ -201,6 +201,22 @@ export async function getPassByToken(token) {
     name: p.name, event: p.event,
     checked_in_at: stamp(p.checkedInAt), gate: p.gate || "",
   };
+}
+
+// Realtime version of getPassByToken for the pass page: cb(pass) on every
+// snapshot, cb(null) when the pass is gone, cb(undefined) on a read error.
+// The stamp on the pass doc is what the attendee sees, so a listener is what
+// makes "Checked in" appear on an already-open pass page the moment a stamp
+// lands (gate-side best-effort write, or the organiser's claim sync).
+export function watchPassByToken(token, cb) {
+  return onSnapshot(doc(db, PASS_PUB, token), (s) => {
+    if (!s.exists()) return cb(null);
+    const p = s.data();
+    cb({
+      name: p.name, event: p.event,
+      checked_in_at: stamp(p.checkedInAt), gate: p.gate || "",
+    });
+  }, () => cb(undefined));
 }
 
 export async function rotateCode(eventId, oldCode) {
@@ -479,6 +495,19 @@ export async function scanToken(code, token, gateName, device) {
       }
       throw e;
     }
+  }
+  // Best-effort pass-page stamp. The claim above is the ONLY authority for
+  // "checked in" — but the attendee's pass page reads its "Checked in" stamp
+  // from the pass doc, and rule sets deployed before the 22 Nov 2026
+  // hardening let the gate write that stamp (that was the original design).
+  // Hardened rules deny this write (owner-only); the denial is swallowed so
+  // scanning never depends on it. Where the write is denied, the organiser
+  // dashboard mirrors claims onto pass docs for legacy events instead (see
+  // stampPassesFromClaims), and the gate still blocks every repeat scan.
+  if (result?.status === "ok") {
+    try {
+      await updateDoc(passRef, { checkedInAt: serverTimestamp(), gate: gateName });
+    } catch { /* cosmetic stamp only — the claim is the authority */ }
   }
   return result;
 }
@@ -1042,4 +1071,96 @@ export async function listRsvps(eventId) {
 export async function listPublicMembers(eventId) {
   const snap = await getDocs(collection(db, "gp_members_public", eventId, "m"));
   return snap.docs.map((d) => ({ uid: d.id, name: d.data().name || "" }));
+}
+
+// ── Organiser dashboard on the SAME v2 events ─────────────────────────────
+// The organiser tools (CSV upload → passes, WhatsApp queue, Sheet sync, gate
+// code, checked-in counter) run on gp_events_v2 — the one canonical event
+// model the public site uses — so an event created anywhere shows up
+// everywhere. CSV-issued passes are written into the shared pass / roster /
+// gate collections exactly like RSVP-issued ones; the owner's private copy
+// of the pass list (with contacts, needed for WhatsApp/email delivery)
+// rides on the owner-only createdEvents index doc, the one per-event store
+// the rules already give the owner unrestricted read/write access to.
+export async function listCreatedEvents(uid) {
+  const snap = await getDocs(collection(db, "gp_users", uid, CREATED));
+  return snap.docs.map((d) => ({
+    id: d.id, name: d.data().title || d.data().name || "",
+    starts_at: stamp(d.data().startsAt),
+    visibility: d.data().visibility === "private" ? "private" : "public",
+  }));
+}
+
+export async function getOrganiserPasses(eventId) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error("Sign in required");
+  const s = await getDoc(doc(db, "gp_users", uid, CREATED, eventId));
+  const rows = s.exists() ? s.data().passes || [] : [];
+  return rows.map((p) => ({
+    id: p.id, name: p.name || "", contact: p.contact || "",
+    token: p.token, created_at: p.created_at || "",
+  }));
+}
+
+export async function generatePassesV2(eventId, rows, { gateCode, publicEvent }) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error("Sign in required");
+  const indexRef = doc(db, "gp_users", uid, CREATED, eventId);
+  for (let i = 0; i < rows.length; i += 160) {
+    const chunk = rows.slice(i, i + 160);
+    const batch = writeBatch(db);
+    const entries = [];
+    for (const p of chunk) {
+      const passId = doc(collection(db, PASS_PUB)).id;
+      const token = newToken();
+      // Same shape (and same restricted key set) as an RSVP-issued pass.
+      batch.set(doc(db, PASS_PUB, token), {
+        id: passId, eventId, name: p.name, event: publicEvent,
+        checkedInAt: null, gate: "",
+      });
+      batch.set(doc(db, GATES, gateCode, "roster", passId), {
+        name: p.name, nameLower: p.name.toLowerCase(),
+        hint: mask(p.contact), token, checkedInAt: null, gate: "",
+      });
+      entries.push({
+        id: passId, name: p.name, contact: p.contact || "", token,
+        created_at: new Date().toISOString(),
+      });
+    }
+    batch.update(doc(db, GATES, gateCode), { total: increment(chunk.length) });
+    batch.update(indexRef, { passes: arrayUnion(...entries) });
+    await batch.commit();
+  }
+}
+
+// Remove the public pass docs of organiser-issued (CSV) passes. Their roster
+// rows, the gate doc and the index doc (which holds the pass list) are all
+// removed by deleteV2Event.
+export async function deleteOrganiserPasses(passes) {
+  for (let i = 0; i < passes.length; i += 400) {
+    const batch = writeBatch(db);
+    passes.slice(i, i + 400).forEach((p) => batch.delete(doc(db, PASS_PUB, p.token)));
+    await batch.commit();
+  }
+}
+
+// Owner-side stamp sync for legacy (gp_events) passes. The hardened rules
+// give the event owner update rights on gp_passes, so while the organiser
+// dashboard is open it mirrors the authoritative claim docs onto the pass
+// docs — that is what makes a legacy pass page show "Checked in" even
+// though gate scans no longer write the stamp themselves.
+export async function stampPassesFromClaims(passes, claims) {
+  const byId = new Map(passes.map((p) => [p.id, p]));
+  let batch = writeBatch(db), n = 0, written = 0;
+  for (const c of claims) {
+    const p = byId.get(c.pass_id);
+    if (!p?.token || !c.scanned_at) continue;
+    batch.update(doc(db, PASS_PUB, p.token), {
+      checkedInAt: new Date(c.scanned_at), gate: c.gate || "",
+    });
+    written++;
+    if (++n === 400) { await batch.commit(); batch = writeBatch(db); n = 0; }
+  }
+  if (n) await batch.commit();
+  return written;
 }

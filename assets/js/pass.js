@@ -15,18 +15,24 @@ function missing(title, body) {
     </section>`;
 }
 
-async function load() {
+let renderedKey = "";
+function load() {
   if (!configured || !fb.configured) return missing("Not set up yet", "This copy of GatePass has no Firebase project configured yet.");
   if (!/^[A-Za-z0-9_-]{32,}$/.test(token)) {
     return missing("No pass here", "This link is incomplete. Open the whole link from your message again, or ask the organiser to resend it.");
   }
-  let p;
-  try { p = await fb.getPassByToken(token); }
-  catch (e) {
-    return missing("Couldn't load", esc(/unavailable|network|deadline/i.test(e.code || "") ? DB_MSG : e.message));
-  }
-  if (!p) return missing("No pass here", "This pass doesn't exist or the event was deleted. Ask the organiser to resend your link.");
-  render(p);
+  // Live listener, not a one-shot read: when the checked-in stamp lands on
+  // the pass doc (written by the gate where the deployed rules allow it, or
+  // mirrored from the claim docs by the organiser's dashboard), an already
+  // open pass flips to "Checked in" on the spot.
+  fb.watchPassByToken(token, (p) => {
+    if (p === undefined) return missing("Couldn't load", DB_MSG);
+    if (!p) return missing("No pass here", "This pass doesn't exist or the event was deleted. Ask the organiser to resend your link.");
+    const key = `${p.name}|${p.checked_in_at || ""}|${p.gate || ""}`;
+    if (key === renderedKey) return;
+    renderedKey = key;
+    render(p);
+  });
 }
 
 // ── the ticket stock: one SVG measured to the ticket, so the scallops, notches and the
@@ -74,12 +80,14 @@ function shape(t) {
     </g>`;
 }
 
+let ticketObserver = null;
 function render(p) {
   const ev = p.event;
   document.title = `${p.name} · ${typo(ev.name)} · GatePass`;
-  // NOTE (21 Nov 2026): checked_in_at on the pass doc is owner-only now —
-  // scans no longer set it, so this stamp only shows if the organiser sets
-  // it. The gate still blocks repeat scans via the one-shot claim doc.
+  // The "Checked in" stamp comes from checkedInAt on the pass doc. The
+  // one-shot claim doc is the authority that blocks repeat scans at the
+  // gate; this stamp is the attendee-visible mirror of it (gate-written
+  // where the deployed rules allow, organiser-mirrored for legacy events).
   const used = !!p.checked_in_at;
   view.innerHTML = `
     <div class="ticket-wrap">
@@ -113,7 +121,9 @@ function render(p) {
   const t = view.querySelector(".ticket");
   setArt(view.querySelector(".t-art"), ev.art);
   shape(t);
-  new ResizeObserver(() => shape(t)).observe(t);
+  ticketObserver?.disconnect();
+  ticketObserver = new ResizeObserver(() => shape(t));
+  ticketObserver.observe(t);
   document.fonts?.ready.then(() => shape(t));
   view.querySelector("#copy").addEventListener("click", async () => {
     (await copyText(passUrl(token))) ? toast("Pass link copied") : toast("Couldn't copy. Long-press the address bar.", "x");

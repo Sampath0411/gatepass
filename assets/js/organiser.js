@@ -72,7 +72,7 @@ function route() {
   // Firestore auto-IDs are 20-character alphanumeric strings, not UUIDs.
   const m = h.match(/^#\/e\/([A-Za-z0-9_-]+)(\/edit)?$/);
   const fm = h.match(/^#\/fest\/([A-Za-z0-9_-]+)$/);
-  if (h === "#/new") return eventForm();
+  if (h === "#/new") return v2EventForm();
   if (h === "#/fests") return festListView();
   if (fm) return festView(fm[1]);
   if (m) return m[2] ? eventForm(m[1]) : eventView(m[1]);
@@ -119,13 +119,30 @@ function signInView(errMsg = "") {
 
 // ─────────────────────────────────────────────── events list
 
+const artIndexOf = (key) => { const i = ART.findIndex((a) => a.key === key); return i < 0 ? 0 : i; };
+
 async function listView() {
   document.title = "Your events · GatePass";
   view.innerHTML = `<div class="skeleton" style="height:220px"></div>`;
-  let data;
+  // ONE event model: the dashboard lists the same gp_events_v2 events the
+  // public site creates and shows. Events made with the first dashboard
+  // (gp_events) still exist, so they are listed underneath and keep their
+  // full toolset — nothing Sam already made is hidden from him.
+  let mine, legacy;
   try {
-    const idx = await withTimeout(fb.listEvents(session.uid));
-    data = await Promise.all(idx.map(async (e) => {
+    const idx = await withTimeout(fb.listCreatedEvents(session.uid));
+    mine = await Promise.all(idx.map(async (e) => {
+      const full = await withTimeout(fb.getV2Event(e.id));
+      const gate = full?.gate_code ? await withTimeout(fb.joinGate(full.gate_code)) : null;
+      return {
+        id: e.id, name: full?.title || e.name, private: (full?.visibility || e.visibility) === "private",
+        starts_at: full?.startsAt || e.starts_at, venue: full?.location || "",
+        art: artIndexOf(full?.cover),
+        total: gate?.counts.total || 0, checked: gate?.counts.checked || 0,
+      };
+    }));
+    const oldIdx = await withTimeout(fb.listEvents(session.uid));
+    legacy = await Promise.all(oldIdx.map(async (e) => {
       const full = await withTimeout(fb.getEvent(e.id));
       const gate = full ? await withTimeout(fb.joinGate(full.gate_code)) : null;
       return {
@@ -137,7 +154,7 @@ async function listView() {
     }));
   } catch (e) { return fail(e); }
   const now = Date.now();
-  const stubs = data.map((e) => {
+  const stub = (e, extra = "") => {
     const total = e.total ?? 0, checked = e.checked ?? 0;
     const past = new Date(e.starts_at).getTime() < now - 12 * 3600e3;
     return `
@@ -145,20 +162,24 @@ async function listView() {
         <span class="stub-art" style="background-image:url('${artUrl(e.art, true)}')"></span>
         <span class="stub-body">
           <span class="stub-name ink">${escT(e.name)}</span>
-          <span class="stub-meta">${esc(fmtWhen(e.starts_at))}${e.venue ? ` · ${esc(e.venue)}` : ""}</span>
+          <span class="stub-meta">${esc(fmtWhen(e.starts_at))}${e.venue ? ` · ${esc(e.venue)}` : ""}${extra}</span>
         </span>
         <span class="stub-count">${checked} / ${total}<small>${total ? "checked in" : "no passes yet"}</small></span>
       </a>`;
-  }).join("");
+  };
   view.innerHTML = `
     <section class="stack narrow">
       <div class="head-row"><h1 class="head">Your events</h1><a class="btn small" href="#/fests">Fests ${I.arrow}</a></div>
-      ${data.length ? stubs : `
+      ${mine.length ? mine.map((e) => stub(e, e.private ? " · Private" : "")).join("") : `
         <div class="empty">
           <h3>No events yet</h3>
-          <p class="sub" style="color:var(--blue)">Make one, drop in your registrations sheet, and every row gets a pass.</p>
+          <p class="sub" style="color:var(--blue)">Make one, drop in your registrations sheet, and every row gets a pass. Events you create here are the same events the homepage shows — one list, everywhere.</p>
         </div>`}
       <a class="btn-primary compact" href="#/new" style="margin-top:6px"><span class="tix">${I.ticket}</span><span class="label">New event</span><span class="arrow">${I.arrow}</span></a>
+      ${legacy.length ? `
+        <h2 class="head" style="margin-top:18px">Earlier events</h2>
+        <p class="fine" style="margin:0">Made with the first version of this dashboard. They still work end to end — passes, gate codes and counters included.</p>
+        ${legacy.map((e) => stub(e)).join("")}` : ""}
     </section>`;
 }
 
@@ -232,6 +253,75 @@ async function eventForm(id = null) {
     }
     btn.disabled = false;
     location.hash = `#/e/${data.id}`;
+  });
+}
+
+// New events are created in the canonical v2 model — the same events the
+// homepage lists and guests RSVP to — so a dashboard event is never a
+// second, separate copy. Editing a v2 event happens in the full editor on
+// the events site (linked from the event's dashboard page); this quick form
+// covers the fields a sheet-driven event needs.
+async function v2EventForm() {
+  const when = (() => { const d = nextSaturday(); d.setHours(18, 0, 0, 0); return d; })();
+  document.title = "New event · GatePass";
+  view.innerHTML = `
+    <div class="narrow">
+    <a class="backlink" href="#">${I.back}Your events</a>
+    <form id="evForm" class="stack" novalidate>
+      <h1 class="head">New event</h1>
+      <label class="field"><span>Event name</span><input class="input" name="name" maxlength="80" required placeholder="e.g. Freshers’ Night 2026"></label>
+      <div class="two">
+        <label class="field"><span>Date</span><input class="input" type="date" name="date" required value="${ymd(when)}"></label>
+        <label class="field"><span>Time</span><input class="input" type="time" name="time" required value="${hm(when)}"></label>
+      </div>
+      <label class="field"><span>Venue</span><input class="input" name="venue" maxlength="120" placeholder="e.g. Main Auditorium"></label>
+      <fieldset class="field" style="border:0;margin:0;padding:0"><span>Poster art</span>
+        <div class="art-pick">
+          ${ART.map((a, i) => `<label><input type="radio" name="art" value="${i}" ${i === 0 ? "checked" : ""} aria-label="${a.name}"><img src="${artUrl(i, true)}" alt="" loading="lazy" width="240" height="240"><span class="art-name">${a.name}</span></label>`).join("")}
+        </div>
+      </fieldset>
+      <div class="two">
+        <label class="field"><span>Visibility</span>
+          <select class="select" name="visibility">
+            <option value="public" selected>Public — listed on the homepage</option>
+            <option value="private">Private — link only</option>
+          </select>
+        </label>
+        <label class="field"><span>Capacity (0 = no limit)</span><input class="input" type="number" name="capacity" min="0" max="100000" value="0"></label>
+      </div>
+      <p class="err" id="fErr" role="alert" hidden></p>
+      <button class="btn-primary compact" type="submit" id="saveBtn"><span class="label">Create event</span><span class="arrow">${I.arrow}</span></button>
+    </form>
+    </div>`;
+  const form = view.querySelector("#evForm"), err = view.querySelector("#fErr");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData(form);
+    const name = String(f.get("name")).trim();
+    const starts = new Date(`${f.get("date")}T${f.get("time") || "18:00"}`);
+    if (!name) { err.textContent = "Give the event a name."; err.hidden = false; return form.name.focus(); }
+    if (isNaN(starts)) { err.textContent = "Pick a date and time."; err.hidden = false; return; }
+    const ends = new Date(starts.getTime() + 3 * 3600e3);
+    const art = Number(f.get("art") || 0);
+    const btn = view.querySelector("#saveBtn"); btn.disabled = true;
+    let id;
+    try {
+      id = await withTimeout(fb.createV2Event({
+        title: name, cover: ART[art]?.key || "crowd",
+        startsAt: starts.toISOString(), endsAt: ends.toISOString(),
+        location: String(f.get("venue")).trim(), description: "", price: "Free",
+        approval: false, capacity: Number(f.get("capacity")) || 0,
+        visibility: String(f.get("visibility")) === "private" ? "private" : "public",
+      }));
+    } catch (e2) {
+      btn.disabled = false;
+      err.textContent = e2.code === "permission-denied"
+        ? "Permission denied. Publish firestore.rules from this project in the Firebase console (see SETUP.md), then try again."
+        : e2.message;
+      err.hidden = false;
+      return;
+    }
+    location.hash = `#/e/${id}`;
   });
 }
 
@@ -319,7 +409,7 @@ async function festView(id) {
   } catch (e) { return fail(e); }
   if (here !== route.last) return;
 
-  const state = { fest, events, regs: [], syncing: false, syncError: "", alive: true };
+  const state = { fest, events, regs: [], syncing: false, syncError: "", alive: true, waSent: new Set(), claimsByEvent: new Map() };
   activeFest = state;
   document.title = `${typo(fest.name)} · GatePass`;
   view.innerHTML = `
@@ -338,10 +428,12 @@ async function festView(id) {
   renderFestSheet(state);
   renderFestEvents(state);
   renderFestRegs(state);
+  loadFestClaims(state);
   regUnsub = fb.watchRegistrations(fest.id, (rows) => {
     if (!state.alive) return;
     state.regs = rows;
     renderFestRegs(state);
+    loadFestClaims(state);
     syncFestSheet(state);
     // Recount each affected sub-event so its "N passes" and capacity stay
     // accurate. Best-effort: a failed write must never break the live table.
@@ -358,6 +450,26 @@ async function festView(id) {
       } catch { /* totals are advisory; the registrations table still works */ }
     });
   });
+}
+
+// Checked-in state for fest sub-events comes from the same one-shot claim
+// docs the gate writes. The fest dashboard previously had no view of it at
+// all — no per-event counter and no per-person "already in" marker.
+async function loadFestClaims(state) {
+  await Promise.all(state.events.map(async (e) => {
+    try {
+      const claims = await fb.getClaims(e.gate_code);
+      state.claimsByEvent.set(e.id, new Map(claims.map((c) => [c.pass_id, c])));
+    } catch { if (!state.claimsByEvent.has(e.id)) state.claimsByEvent.set(e.id, new Map()); }
+  }));
+  if (!state.alive) return;
+  renderFestEvents(state);
+  renderFestRegs(state);
+}
+
+function festMsg(state, r) {
+  const first = (r.name || "").split(" ")[0];
+  return `Hi ${first}! Your pass for ${r.eventName || state.fest.name} (${state.fest.name}):\n${passUrl(r.token)}\nShow the QR at the gate. It works once, so don't share it.`;
 }
 
 function renderFestSheet(state) {
@@ -473,7 +585,7 @@ function renderFestEvents(state) {
       return `
     <li>
       <p class="pl-name">${escT(e.name)}</p>
-      <p class="pl-meta">${esc(fmtWhen(e.starts_at))}${e.venue ? ` · ${esc(e.venue)}` : ""} · Gate code <b>${esc(fmtCode(e.gate_code))}</b> · ${e.registration_open ? "open" : "closed"} · ${plural(e.total || 0, "pass")}</p>
+      <p class="pl-meta">${esc(fmtWhen(e.starts_at))}${e.venue ? ` · ${esc(e.venue)}` : ""} · Gate code <b>${esc(fmtCode(e.gate_code))}</b> · ${e.registration_open ? "open" : "closed"} · ${plural(e.total || 0, "pass")} · ${state.claimsByEvent.get(e.id)?.size || 0} checked in</p>
       <div class="pl-actions">
         <a class="btn small" href="${esc(link)}" target="_blank" rel="noopener" title="Share this link with students">${I.open}Register link</a>
         <button class="btn small" type="button" data-open="${esc(e.id)}" data-next="${e.registration_open ? "false" : "true"}">${e.registration_open ? "Close registration" : "Open registration"}</button>
@@ -549,37 +661,97 @@ function renderFestRegs(state) {
   if (!box) return;
   const rows = state.regs.slice()
     .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
-  const body = rows.map((r) => `
+  const waRows = rows.filter((r) => isPhone(r.phone || ""));
+  const body = rows.map((r) => {
+    const claim = state.claimsByEvent?.get(r.eventId)?.get(r.passId);
+    const wa = isPhone(r.phone || "") ? normalizePhone(r.phone) : null;
+    return `
     <tr>
       <td>${esc(fmtWhen(r.created_at))}</td>
       <td>${escT(r.eventName)}</td>
       <td>${esc(r.name)}</td>
       <td>${esc(r.email || "—")}</td>
       <td>${esc(r.phone || "—")}</td>
-      <td><a href="${esc(passUrl(r.token))}" target="_blank" rel="noopener">Open pass</a></td>
+      <td><a href="${esc(passUrl(r.token))}" target="_blank" rel="noopener">Open pass</a>${wa ? ` · <a href="https://wa.me/${wa}?text=${encodeURIComponent(festMsg(state, r))}" target="_blank" rel="noopener">WhatsApp</a>` : ""}</td>
+      <td>${claim ? `<span class="in">In ${esc(fmtTime(claim.scanned_at))} · ${esc(claim.gate)}</span>` : "—"}</td>
       <td>${r.sheet_synced ? "Synced" : "Pending"}</td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
   box.innerHTML = `
     <div class="head-row"><h2 class="head">All registrations</h2><span class="fine">${plural(rows.length, "registration")}</span></div>
     <div class="tools"><button class="btn small" type="button" id="regsCsv">${I.download}Export CSV</button></div>
     ${rows.length ? `
+    <div class="stack" style="gap:8px">
+      <p class="fine" style="margin:0"><b>WhatsApp delivery</b> — ${waRows.length} of ${rows.length} registrations have a phone number. Each tap opens one WhatsApp chat with that person's pass already written in — you tap Send. Nothing is sent automatically.</p>
+      <div class="btns">
+        <button class="btn small" type="button" id="festWaNext">${I.chat}Send next on WhatsApp</button>
+        <button class="btn small" type="button" id="festWaCopy">${I.copy}Copy all WhatsApp messages</button>
+      </div>
+      <p class="fine" id="festWaStatus" style="margin:0"></p>
+    </div>
       <table class="preview-table">
-        <thead><tr><th>Time</th><th>Sub-event</th><th>Name</th><th>Email</th><th>Phone</th><th>Pass</th><th>Sheet</th></tr></thead>
+        <thead><tr><th>Time</th><th>Sub-event</th><th>Name</th><th>Email</th><th>Phone</th><th>Pass</th><th>Gate</th><th>Sheet</th></tr></thead>
         <tbody>${body}</tbody>
       </table>` : `<p class="fine" style="margin:0">No registrations yet. Share a sub-event's registration link to get started.</p>`}`;
   box.querySelector("#regsCsv").onclick = () => {
-    const data = [["created_at", "sub_event", "name", "email", "phone", "pass_url", "sheet_status"]].concat(rows.map((r) => [
-      r.created_at || "", r.eventName || "", r.name || "", r.email || "", r.phone || "",
-      passUrl(r.token), r.sheet_synced ? "synced" : "pending",
-    ]));
+    const data = [["created_at", "sub_event", "name", "email", "phone", "pass_url", "checked_in_at", "gate", "sheet_status"]].concat(rows.map((r) => {
+      const claim = state.claimsByEvent?.get(r.eventId)?.get(r.passId);
+      return [
+        r.created_at || "", r.eventName || "", r.name || "", r.email || "", r.phone || "",
+        passUrl(r.token), claim ? claim.scanned_at || "" : "", claim ? claim.gate || "" : "",
+        r.sheet_synced ? "synced" : "pending",
+      ];
+    }));
     download(`${csvSlug(state.fest.name)}-registrations.csv`, toCsv(data));
   };
+  if (!rows.length) return;
+  // Same one-tap-per-chat WhatsApp queue as the single-event dashboard.
+  const waStatus = () => {
+    const statusEl = box.querySelector("#festWaStatus");
+    const nextBtn = box.querySelector("#festWaNext");
+    if (!statusEl || !nextBtn) return;
+    const done = state.waSent.size, total = waRows.length;
+    if (!total) {
+      statusEl.textContent = "No registrations have a phone number yet — use Open pass / copy link for those.";
+      nextBtn.disabled = true;
+      return;
+    }
+    const next = waRows.find((r) => !state.waSent.has(r.id));
+    statusEl.textContent = done >= total
+      ? `All ${total} WhatsApp passes opened. Reopen any row's WhatsApp link to resend one.`
+      : `${done} of ${total} sent this session — next: ${next.name}.`;
+    nextBtn.disabled = done >= total;
+  };
+  box.querySelector("#festWaNext").onclick = () => {
+    const next = waRows.find((r) => !state.waSent.has(r.id));
+    if (!next) return waStatus();
+    const d = normalizePhone(next.phone);
+    state.waSent.add(next.id);
+    if (d) window.open(`https://wa.me/${d}?text=${encodeURIComponent(festMsg(state, next))}`, "_blank", "noopener");
+    waStatus();
+  };
+  box.querySelector("#festWaCopy").onclick = async () => {
+    const text = waRows.map((r) => festMsg(state, r)).join("\n\n");
+    (await copyText(text)) ? toast(`${plural(waRows.length, "WhatsApp message")} copied`) : toast("Couldn't copy", "x");
+  };
+  waStatus();
 }
 
 // ─────────────────────────────────────────────── one event
 
 async function eventView(id) {
   view.innerHTML = `<div class="skeleton" style="height:520px"></div>`;
+  // Canonical first: an event created on the public site (gp_events_v2) and
+  // an event created here are the same event, with the same dashboard.
+  // Legacy gp_events from the first dashboard resolve through the fallback.
+  let v2 = null;
+  try { v2 = await withTimeout(fb.getV2Event(id)); } catch {}
+  if (v2 && v2.ownerId === session.uid) {
+    let loaded;
+    try { loaded = await loadV2State(v2); }
+    catch (e) { return fail(e); }
+    return eventDashboard(loaded);
+  }
   let ev, passes, gate, claims = [];
   try {
     ev = await withTimeout(fb.getEvent(id));
@@ -588,11 +760,56 @@ async function eventView(id) {
     gate = await withTimeout(fb.joinGate(ev.gate_code));
   } catch (e) { return fail(e); }
   try { claims = await fb.getClaims(ev.gate_code); } catch {}
+  return eventDashboard({
+    kind: "v1", ev, passes, gate, claims,
+    canRotate: true, editHref: `#/e/${id}/edit`,
+    genBatch: (rows) => fb.generatePasses(id, rows, { name: ev.name, club: ev.club, starts_at: ev.starts_at, venue: ev.venue, art: ev.art, gateCode: ev.gate_code }),
+    reloadPasses: () => fb.getPasses(id),
+    removeEvent: () => fb.deleteEvent(id),
+  });
+}
 
+// Load a v2 event into the same dashboard state shape the legacy flow uses.
+async function loadV2State(v2) {
+  const ev = {
+    id: v2.id, name: v2.title, club: "", venue: v2.location || "",
+    art: artIndexOf(v2.cover), starts_at: v2.startsAt, gate_code: v2.gate_code,
+  };
+  const passes = await withTimeout(fb.getOrganiserPasses(v2.id));
+  const gate = ev.gate_code ? await withTimeout(fb.joinGate(ev.gate_code)) : null;
+  let claims = [];
+  try { claims = await fb.getClaims(ev.gate_code); } catch {}
+  const publicEvent = {
+    name: v2.title, title: v2.title, cover: v2.cover, art: ev.art,
+    starts_at: v2.startsAt, ends_at: v2.endsAt, location: v2.location || "",
+    venue: v2.location || "", description: v2.description || "", price: v2.price || "Free",
+  };
+  return {
+    kind: "v2", ev, passes, gate, claims,
+    // Gate-code rotation is not offered for v2 events: the current rules
+    // only let a new gate doc be created in the same batch as its event,
+    // and existing claims cannot be re-created under a new code — rotating
+    // would strand the check-in history and reopen already-scanned passes.
+    canRotate: false, editHref: `../#/create/${v2.id}`,
+    genBatch: (rows) => fb.generatePassesV2(v2.id, rows, { gateCode: ev.gate_code, publicEvent }),
+    reloadPasses: () => fb.getOrganiserPasses(v2.id),
+    removeEvent: async () => {
+      const current = await fb.getOrganiserPasses(v2.id);
+      await fb.deleteOrganiserPasses(current);
+      await fb.deleteV2Event(v2.id);
+    },
+  };
+}
+
+function eventDashboard({ kind, ev, passes, gate, claims, canRotate, editHref, genBatch, reloadPasses, removeEvent }) {
+  const id = ev.id;
   passes.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.name.localeCompare(b.name));
   // Only bounced comes from the staff-writable gate doc; the checked count and
   // per-pass stamps come from immutable claim docs.
-  const state = { ev, passes, first: new Map(), bounced: gate?.counts.bounced ?? 0, checked: 0, upload: null, filter: "", shown: 120, waSent: new Set(), sheet: null };
+  const state = { kind, ev, passes, first: new Map(), bounced: gate?.counts.bounced ?? 0, checked: 0, upload: null, filter: "", shown: 120, waSent: new Set(), sheet: null, stamped: new Set(), canRotate, editHref, genBatch, reloadPasses, removeEvent };
+  // The gate total counts every pass on the gate (RSVPs + sheet-issued);
+  // this dashboard's own list may hold only the sheet-issued ones.
+  state.total = gate?.counts.total ?? passes.length;
   for (const claim of claims) if (claim.is_first) state.first.set(claim.pass_id, claim);
   state.checked = state.first.size;
   // Remember this event's last synced Sheet link (this browser only).
@@ -618,7 +835,7 @@ async function eventView(id) {
         <ul class="passlist" id="plist"></ul>
         <div class="more-row" id="more"></div>
         <div class="danger-zone">
-          <a class="btn small" href="#/e/${id}/edit">Edit details</a>
+          <a class="btn small" href="${esc(state.editHref)}">Edit details</a>
           <button class="btn small danger" type="button" id="del">${I.trash}Delete event</button>
         </div>
       </div>
@@ -637,7 +854,7 @@ async function eventView(id) {
     if (Date.now() - armed > 4000) { armed = Date.now(); del.innerHTML = `${I.trash}Tap again to delete ${plural(state.passes.length, "pass", "passes")}`; setTimeout(() => { if (del.isConnected) del.innerHTML = `${I.trash}Delete event`; }, 4000); return; }
     del.disabled = true;
     try {
-      await withTimeout(fb.deleteEvent(id));
+      await withTimeout(state.removeEvent(), 30000);
     } catch (e) {
       del.disabled = false;
       return toast(e.message, "x");
@@ -796,7 +1013,7 @@ async function generate(state) {
   for (let i = 0; i < total; i += 100) {
     const batch = list.slice(i, i + 100).map((p) => ({ name: p.name, contact: p.contact }));
     try {
-      await withTimeout(fb.generatePasses(state.ev.id, batch, { name: state.ev.name, club: state.ev.club, starts_at: state.ev.starts_at, venue: state.ev.venue, art: state.ev.art, gateCode: state.ev.gate_code }), 30000);
+      await withTimeout(state.genBatch(batch), 30000);
     } catch (e) { failed = e; break; }
     done += batch.length;
   }
@@ -806,15 +1023,17 @@ async function generate(state) {
   if (failed) toast(`Stopped after ${done}: ${failed.message}`, "x");
   else toast(`${plural(done, "pass", "passes")} ready`);
   try {
-    state.passes = await withTimeout(fb.getPasses(state.ev.id));
+    state.passes = await withTimeout(state.reloadPasses());
     state.passes.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.name.localeCompare(b.name));
+    const gate = await withTimeout(fb.joinGate(state.ev.gate_code));
+    if (gate) state.total = gate.counts.total;
   } catch {}
   renderReg(state); renderStat(state); renderPassTools(state); renderList(state);
 }
 
 // ── checked-in counter ──
 function renderStat(state, bump = false) {
-  const total = state.passes.length, checked = state.checked ?? state.first.size;
+  const total = state.total ?? state.passes.length, checked = state.checked ?? state.first.size;
   const el = view.querySelector("#stat");
   el.innerHTML = `
     <span class="dot">${I.dotCheck}</span>
@@ -835,13 +1054,13 @@ function renderGate(state, showQr = false) {
     <div class="btns">
       <button class="btn small" type="button" id="cpGate">${I.link}Copy gate link</button>
       <button class="btn small" type="button" id="qrGate" aria-expanded="${showQr}">${I.qr}${showQr ? "Hide QR" : "Show QR"}</button>
-      <button class="btn small" type="button" id="rot">${I.refresh}New code</button>
+      ${state.canRotate ? `<button class="btn small" type="button" id="rot">${I.refresh}New code</button>` : ""}
     </div>
     ${showQr ? `<div class="gate-qr">${qrSvg(gateUrl(ev.gate_code), { label: "QR to join the gate" })}<p class="fine" style="color:var(--blue);margin:0">Staff scan this with their phone camera to open the scanner with the code filled in.</p></div>` : ""}`;
   el.querySelector("#cpGate").addEventListener("click", async () => { (await copyText(gateUrl(ev.gate_code))) ? toast("Gate link copied") : toast("Couldn't copy", "x"); });
   el.querySelector("#qrGate").addEventListener("click", () => renderGate(state, !showQr));
   let armed = 0;
-  el.querySelector("#rot").addEventListener("click", async (e) => {
+  el.querySelector("#rot")?.addEventListener("click", async (e) => {
     const b = e.currentTarget;
     if (Date.now() - armed > 4000) { armed = Date.now(); b.innerHTML = `${I.refresh}Tap again: old code stops working`; return; }
     b.disabled = true;
@@ -1063,6 +1282,18 @@ function startLive(state) {
         state.bounced = lastBounced;
         renderStat(state, state.checked !== prevChecked || state.bounced !== prevBounced);
         renderList(state);
+        // Legacy events only: mirror new claims onto the pass docs (an
+        // owner-only write) so those pass pages show "Checked in" under the
+        // hardened rules, where gate scans no longer stamp the pass doc.
+        // v2 passes rely on the gate's own best-effort stamp at scan time.
+        if (state.kind === "v1") {
+          const fresh = claims.filter((c) => c.is_first && !state.stamped.has(c.pass_id));
+          if (fresh.length) {
+            fb.stampPassesFromClaims(state.passes, fresh)
+              .then(() => fresh.forEach((c) => state.stamped.add(c.pass_id)))
+              .catch(() => {});
+          }
+        }
       } while (again);
     } finally {
       refreshing = false;
