@@ -1,5 +1,5 @@
 // Gate scanner. Staff hold the event's gate code; every call is code-checked against the gate.
-import { configured, esc, typo, fmtTime, fmtCode, store, I, paintIcons, plural } from "./core.js";
+import { configured, esc, typo, fmtTime, fmtCode, store, I, paintIcons, plural, wireThemeToggles } from "./core.js";
 import * as fb from "./firebase.js";
 import { Camera, decode, tokenFrom } from "./scanner.js";
 
@@ -13,6 +13,7 @@ const S = {
 };
 store.set("gp.device", S.device);
 paintIcons();
+wireThemeToggles();
 $("findBtn").innerHTML = I.search;
 $("photoLbl").innerHTML = I.camera;
 document.querySelectorAll(".fine").forEach((p) => { p.innerHTML = p.innerHTML.replace("${search}", `<span class="hint-ico">${I.search}</span>`).replace("${camera}", `<span class="hint-ico">${I.camera}</span>`); });

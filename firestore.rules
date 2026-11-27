@@ -20,6 +20,42 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/gp_passes/$(token)).data.eventId == eventId;
     }
 
+    // ── Claim-bound stamp projection (28 Nov 2026) ──
+    // The pass page reads its "Checked in" stamp from the pass doc, but the
+    // stamp writers are all owner-side (gate staff are signed out, and the
+    // organiser mirror only runs while a dashboard is open). These helpers
+    // let ANY caller project a genuine claim onto its pass doc: the write
+    // is accepted only when a claim doc already exists for this exact pass
+    // under its event's gate code, the pass is not stamped yet, and the
+    // written checkedInAt/gate are byte-identical to the claim's own
+    // scannedAt/gate. Nothing about the check-in can be forged through
+    // this grant — the guarded claim-create above stays the only way a
+    // check-in comes into existence; this is purely its public mirror.
+    function stampMatchesClaim(code, data) {
+      return code is string && code != ''
+        && exists(/databases/$(database)/documents/gp_gates/$(code)/claims/$(data.id))
+        && request.resource.data.checkedInAt
+             == get(/databases/$(database)/documents/gp_gates/$(code)/claims/$(data.id)).data.scannedAt
+        && request.resource.data.gate
+             == get(/databases/$(database)/documents/gp_gates/$(code)/claims/$(data.id)).data.gate;
+    }
+    function v2StampProjection(data) {
+      return exists(/databases/$(database)/documents/gp_events_v2/$(data.eventId))
+        && stampMatchesClaim(
+             get(/databases/$(database)/documents/gp_events_v2/$(data.eventId)).data.get('gateCode', ''), data);
+    }
+    function v1StampProjection(data) {
+      return exists(/databases/$(database)/documents/gp_events/$(data.eventId))
+        && stampMatchesClaim(
+             get(/databases/$(database)/documents/gp_events/$(data.eventId)).data.get('gateCode', ''), data);
+    }
+    function festStampProjection(data) {
+      return data.get('festId', '') is string && data.get('festId', '') != ''
+        && exists(/databases/$(database)/documents/gp_fests/$(data.festId)/events/$(data.eventId))
+        && stampMatchesClaim(
+             get(/databases/$(database)/documents/gp_fests/$(data.festId)/events/$(data.eventId)).data.get('gateCode', ''), data);
+    }
+
     // Organiser's event list index — scoped by uid so no query rules are needed.
     match /gp_users/{uid}/events/{eventId} {
       allow read, create, update, delete: if signedIn() && uid == request.auth.uid;
@@ -169,6 +205,19 @@ service cloud.firestore {
       allow update: if isOwnerEventV2(resource.data.eventId)
         && request.resource.data.diff(resource.data).affectedKeys()
              .hasOnly(['checkedInAt', 'gate']);
+      // Claim-bound projection (28 Nov 2026): anyone — the gate phone right
+      // after a scan, the organiser mirror, even the pass page's own
+      // session — may write the stamp when it is an exact copy of an
+      // existing claim for this pass and the pass is unstamped. See
+      // stampMatchesClaim above. This removes the stamp's dependence on
+      // the organiser dashboard being open (the 27 Nov 2026 live failure:
+      // claim written, pass page never updated).
+      allow update: if resource.data.get('checkedInAt', null) == null
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['checkedInAt', 'gate'])
+        && (v2StampProjection(resource.data)
+            || v1StampProjection(resource.data)
+            || festStampProjection(resource.data));
       // V2 events are not under gp_events, so the legacy owner grant above
       // cannot match them. The owner may revoke a pass while the event exists.
       allow delete: if isOwnerEventV2(resource.data.eventId);

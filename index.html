@@ -9,6 +9,19 @@
 <link rel="icon" href="assets/img/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="assets/css/gatepass.css">
 <link rel="stylesheet" href="assets/css/luma.css">
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem("gp-theme");
+    if (t && t.charAt(0) === '"') t = JSON.parse(t);
+    if (t === "dark") {
+      document.documentElement.dataset.theme = "dark";
+      var m = document.querySelector('meta[name="theme-color"]');
+      if (m) m.setAttribute("content", "#12121C");
+    }
+  } catch (e) {}
+})();
+</script>
 <script type="importmap">
 {"imports":{
   "firebase/app":"https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js",

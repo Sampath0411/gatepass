@@ -1,5 +1,5 @@
 // The attendee's pass. Public at /p/#<token>; reads only its own public pass document.
-import { configured, esc, escT, typo, fmtWhen, fmtTime, qrSvg, setArt, passUrl, copyText, toast, I, ROOT, DB_MSG } from "./core.js";
+import { configured, esc, escT, typo, fmtWhen, fmtTime, qrSvg, setArt, passUrl, copyText, toast, I, ROOT, DB_MSG, wireThemeToggles } from "./core.js";
 import { passImageBlob, shareOrDownload } from "./pass-image.js";
 import * as fb from "./firebase.js";
 
@@ -61,10 +61,16 @@ function shape(t) {
   d += `L${f(w)} 0L${f(w)} ${f(ty - R)}A${R} ${R} 0 0 0 ${f(w)} ${f(ty + R)}L${f(w)} ${f(h)}`;
   for (const [x, q] of [...centres].reverse()) d += `L${f(x + q)} ${f(h)}A${q} ${q} 0 0 0 ${f(x - q)} ${f(h)}`;
   d += `L0 ${f(h)}L0 ${f(ty + R)}A${R} ${R} 0 0 0 0 ${f(ty - R)}Z`;
+  // Stock + frame ink come from the theme variables (body.luma remaps
+  // --paper-hi / --blue per theme), so the ticket prints on charcoal in
+  // dark mode with the brightened frame ink, not on hard-coded paper.
+  const cs = getComputedStyle(document.body);
+  const stock = cs.getPropertyValue("--paper-hi").trim() || "#FFFBF9";
+  const frame = cs.getPropertyValue("--blue").trim() || "#1A43B4";
   t.querySelector(".t-shape").innerHTML = `
     <defs>
       <pattern id="gp-stock" patternUnits="userSpaceOnUse" width="512" height="512">
-        <rect width="512" height="512" fill="#FFFBF9"/><image href="${img("mottle.png")}" width="512" height="512"/>
+        <rect width="512" height="512" fill="${stock}"/><image href="${img("mottle.png")}" width="512" height="512"/>
       </pattern>
       <pattern id="gp-inkpat" patternUnits="userSpaceOnUse" width="256" height="256"><image href="${img("ink.png")}" width="256" height="256"/></pattern>
       <mask id="gp-ink" maskUnits="userSpaceOnUse" x="-10" y="-10" width="${W + 20}" height="${H + 20}" style="mask-type:alpha"><rect x="-10" y="-10" width="${W + 20}" height="${H + 20}" fill="url(#gp-inkpat)"/></mask>
@@ -75,12 +81,13 @@ function shape(t) {
     </defs>
     <g transform="translate(${k} ${k})">
       <path d="${d}" fill="url(#gp-stock)"/>
-      <path d="${d}" fill="none" stroke="#1A43B4" stroke-opacity=".3" stroke-width="2" transform="translate(1.3 1.1)" filter="url(#gp-rough)"/>
+      <path d="${d}" fill="none" stroke="${frame}" stroke-opacity=".3" stroke-width="2" transform="translate(1.3 1.1)" filter="url(#gp-rough)"/>
       <g mask="url(#gp-ink)"><path d="${d}" fill="none" stroke="#FF4FB8" stroke-width="4.6" stroke-linejoin="round" filter="url(#gp-rough)"/></g>
     </g>`;
 }
 
 let ticketObserver = null;
+let themeShape = null;
 function render(p) {
   const ev = p.event;
   document.title = `${p.name} · ${typo(ev.name)} · GatePass`;
@@ -125,6 +132,10 @@ function render(p) {
   ticketObserver = new ResizeObserver(() => shape(t));
   ticketObserver.observe(t);
   document.fonts?.ready.then(() => shape(t));
+  // The stock is drawn from theme variables; redraw it when the theme flips.
+  if (themeShape) window.removeEventListener("gp-themechange", themeShape);
+  themeShape = () => shape(t);
+  window.addEventListener("gp-themechange", themeShape);
   view.querySelector("#copy").addEventListener("click", async () => {
     (await copyText(passUrl(token))) ? toast("Pass link copied") : toast("Couldn't copy. Long-press the address bar.", "x");
   });
@@ -149,4 +160,5 @@ async function keepAwake() {
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && lock?.released) keepAwake(); });
 window.addEventListener("hashchange", () => location.reload());
 
+wireThemeToggles();
 load();

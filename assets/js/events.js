@@ -2,7 +2,7 @@
 import * as fb from "./firebase.js";
 import {
   ART, I, artUrl, esc, fmtWhen, fmtTime, passUrl, gateUrl, fmtCode, copyText,
-  configured as coreConfigured, toast, download, DB_MSG, qrSvg,
+  configured as coreConfigured, toast, download, DB_MSG, qrSvg, wireThemeToggles,
 } from "./core.js";
 import { toCsv } from "./csv.js";
 
@@ -58,6 +58,8 @@ const IX = {
   grid: ic('<rect x="3" y="3" width="7" height="7" rx="1.4"/><rect x="14" y="3" width="7" height="7" rx="1.4"/><rect x="3" y="14" width="7" height="7" rx="1.4"/><rect x="14" y="14" width="7" height="7" rx="1.4"/>'),
   pin: ic('<path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 1 1 16 0z"/><circle cx="12" cy="10" r="2.5"/>'),
   clock: ic('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>'),
+  moon: ic('<path d="M20 13.6A8.4 8.4 0 1 1 10.4 4a6.9 6.9 0 0 0 9.6 9.6z"/>'),
+  sun: ic('<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5 5l1.7 1.7M17.3 17.3 19 19M19 5l-1.7 1.7M6.7 17.3 5 19"/>'),
   globe: ic('<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/>'),
   bell: ic('<path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9z"/><path d="M10 21h4"/>'),
   caret: ic('<path d="m9 5 7 7-7 7"/>'),
@@ -230,6 +232,7 @@ function navHTML() {
         </nav>
       </div>
       <div class="l-nav-right">
+        <button class="l-icon-btn gp-theme-toggle" type="button" aria-label="Switch to dark mode" aria-pressed="false" title="Dark mode"><span class="ic-moon">${IX.moon}</span><span class="ic-sun">${IX.sun}</span></button>
         <button class="l-icon-btn" data-action="clock" title="Local time" aria-label="Local time">${IX.clock}</button>
         <span class="l-clock" id="l-clock">${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
         <button class="l-icon-btn" data-action="notify" title="Notifications" aria-label="Notifications">${IX.bell}</button>
@@ -1284,6 +1287,7 @@ async function route() {
   const wide = r === "create" || r === "event" ? " l-main-wide" : "";
   mountNode.className = "luma-root";
   mountNode.innerHTML = `${navHTML()}<main class="l-main${wide}" id="l-view" aria-live="polite">${skeleton()}</main>`;
+  wireThemeToggles(mountNode);
   if (r === "calendar") return renderCalendar(seq);
   if (r === "discover") return renderDiscover(seq);
   if (r === "create") return renderCreate(h.startsWith("create/") ? h.slice(7) : null, seq);

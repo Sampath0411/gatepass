@@ -1,7 +1,7 @@
 // Organiser app: sign in, events, registrations → passes, links, gate code, live counter.
 import {
   configured, ART, artUrl, passUrl, gateUrl, fmtCode, fmtWhen, fmtTime, fmtDay, esc, plural,
-  copyText, toast, download, qrSvg, I, paintIcons, DB_MSG, escT, typo, store,
+  copyText, toast, download, qrSvg, I, paintIcons, DB_MSG, escT, typo, store, wireThemeToggles,
 } from "./core.js";
 import * as fb from "./firebase.js";
 import * as sheets from "./sheets.js";
@@ -96,7 +96,10 @@ function fail(e) {
   const msg = e?.message || String(e);
   const signature = `${e?.code || ""} ${msg}`;
   const paused = /unavailable|deadline-exceeded|network|fetch|5\d\d/.test(signature) ? DB_MSG + " Or check your connection." : msg;
-  view.innerHTML = `<section class="empty"><h3>Something broke</h3><p class="sub">${esc(paused)}</p><p style="margin-top:14px"><button class="btn small" type="button" onclick="location.reload()">${I.refresh}Try again</button></p></section>`;
+  // No inline onclick: the site's CSP (vercel.json) has no 'unsafe-inline'
+  // for scripts, so an inline handler would be a dead button in production.
+  view.innerHTML = `<section class="empty"><h3>Something broke</h3><p class="sub">${esc(paused)}</p><p style="margin-top:14px"><button class="btn small" type="button" id="failRetry">${I.refresh}Try again</button></p></section>`;
+  view.querySelector("#failRetry")?.addEventListener("click", () => location.reload());
 }
 
 // ─────────────────────────────────────────────── sign in
@@ -488,7 +491,10 @@ async function loadFestClaims(state) {
       .map((r) => ({ id: r.passId, token: r.token }));
     const claims = [...state.claimsByEvent.values()]
       .flatMap((m) => [...m.entries()].map(([pass_id, c]) => ({ pass_id, scanned_at: c.scanned_at, gate: c.gate })));
-    if (passes.length && claims.length) fb.stampPassesFromClaims(passes, claims).catch(() => {});
+    if (passes.length && claims.length) {
+      fb.stampPassesFromClaims(passes, claims)
+        .catch((e) => surfaceStampError("fest stamp mirror", e));
+    }
   }
   renderFestEvents(state);
   renderFestRegs(state);
@@ -815,13 +821,27 @@ async function eventView(id) {
   });
 }
 
+// The dashboard's ONE pass list for a v2 event: organiser-issued passes
+// (sheet/paste import) PLUS every RSVP-issued pass (Google and guest),
+// each tagged with its source. The gate doc's counters and the claim docs
+// already cover both universes — a dashboard that listed only the
+// sheet-issued ones showed three different totals on one screen and hid
+// the RSVP passes from the organiser entirely (live test, 27 Nov 2026).
+async function loadUnifiedPasses(eventId) {
+  const [own, rsvp] = await Promise.all([
+    withTimeout(fb.getOrganiserPasses(eventId)),
+    withTimeout(fb.getRsvpPasses(eventId)),
+  ]);
+  return [...own.map((p) => ({ ...p, source: "organiser" })), ...rsvp];
+}
+
 // Load a v2 event into the same dashboard state shape the legacy flow uses.
 async function loadV2State(v2) {
   const ev = {
     id: v2.id, name: v2.title, club: "", venue: v2.location || "",
     art: artIndexOf(v2.cover), starts_at: v2.startsAt, gate_code: v2.gate_code,
   };
-  const passes = await withTimeout(fb.getOrganiserPasses(v2.id));
+  const passes = await loadUnifiedPasses(v2.id);
   const gate = ev.gate_code ? await withTimeout(fb.joinGate(ev.gate_code)) : null;
   let claims = [];
   try { claims = await fb.getClaims(ev.gate_code); } catch {}
@@ -831,15 +851,19 @@ async function loadV2State(v2) {
     venue: v2.location || "", description: v2.description || "", price: v2.price || "Free",
   };
   return {
-    kind: "v2", ev, passes, gate, claims,
+    kind: "v2", ev, passes, gate, claims, unified: true,
     // Gate-code rotation is not offered for v2 events: the current rules
     // only let a new gate doc be created in the same batch as its event,
     // and existing claims cannot be re-created under a new code — rotating
     // would strand the check-in history and reopen already-scanned passes.
     canRotate: false, editHref: `../#/create/${v2.id}`,
     genBatch: (rows) => fb.generatePassesV2(v2.id, rows, { gateCode: ev.gate_code, publicEvent }),
-    reloadPasses: () => fb.getOrganiserPasses(v2.id),
-    markWaSent: (p) => fb.markOrganiserPassWaSent(v2.id, p.id),
+    reloadPasses: () => loadUnifiedPasses(v2.id),
+    // The sent marker lives in a different store per universe: the owner's
+    // index-doc array for sheet-issued passes, the RSVP doc for RSVP ones.
+    markWaSent: (p) => p.source === "organiser"
+      ? fb.markOrganiserPassWaSent(v2.id, p.id)
+      : fb.markRsvpWaSent(v2.id, p.id),
     removeEvent: async () => {
       const current = await fb.getOrganiserPasses(v2.id);
       await fb.deleteOrganiserPasses(current);
@@ -848,7 +872,7 @@ async function loadV2State(v2) {
   };
 }
 
-function eventDashboard({ kind, ev, passes, gate, claims, canRotate, editHref, genBatch, reloadPasses, removeEvent, markWaSent }) {
+function eventDashboard({ kind, ev, passes, gate, claims, canRotate, editHref, genBatch, reloadPasses, removeEvent, markWaSent, unified = false }) {
   const id = ev.id;
   // Creation order ONLY: generation stamps each pass 1ms apart precisely so
   // this sort reproduces the sheet's row order. A name tiebreak here used to
@@ -856,10 +880,12 @@ function eventDashboard({ kind, ev, passes, gate, claims, canRotate, editHref, g
   passes.sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
   // Only bounced comes from the staff-writable gate doc; the checked count and
   // per-pass stamps come from immutable claim docs.
-  const state = { kind, ev, passes, first: new Map(), bounced: gate?.counts.bounced ?? 0, checked: 0, upload: null, filter: "", shown: 120, waSent: new Set(passes.filter((p) => p.wa_sent_at).map((p) => p.id)), sheet: null, stamped: new Set(), canRotate, editHref, genBatch, reloadPasses, removeEvent, markWaSent };
-  // The gate total counts every pass on the gate (RSVPs + sheet-issued);
-  // this dashboard's own list may hold only the sheet-issued ones.
-  state.total = gate?.counts.total ?? passes.length;
+  const state = { kind, ev, passes, first: new Map(), bounced: gate?.counts.bounced ?? 0, checked: 0, upload: null, filter: "", shown: 120, waSent: new Set(passes.filter((p) => p.wa_sent_at).map((p) => p.id)), sheet: null, stamped: new Set(), canRotate, editHref, genBatch, reloadPasses, removeEvent, markWaSent, unified };
+  // Unified (v2) dashboards list every pass there is — sheet-issued and
+  // RSVP-issued — so the list length IS the total, the same number the
+  // gate doc counts and the scanner shows. Legacy dashboards keep reading
+  // the gate doc's total.
+  state.total = unified ? passes.length : (gate?.counts.total ?? passes.length);
   for (const claim of claims) if (claim.is_first) state.first.set(claim.pass_id, claim);
   state.checked = state.first.size;
   // Remember this event's last synced Sheet link (this browser only).
@@ -943,9 +969,23 @@ function renderReg(state) {
       </div>`;
     slot.querySelector("#file").addEventListener("change", async (e) => {
       const f = e.target.files?.[0];
+      e.target.value = "";   // let the same file be re-picked after an error
       if (!f) return;
       if (f.size > 4e6) return toast("That file is over 4 MB. Export just the responses sheet.", "x");
-      loadRows(state, await f.text(), f.name);
+      // The accept attribute is only a file-picker hint — enforce the sheet
+      // types here, and never let a binary file (photo, PDF, archive) reach
+      // the CSV parser as garbage rows. Name/extension is checked because
+      // the OS-supplied MIME type for .csv is unreliable across platforms.
+      if (!/\.(csv|tsv|txt)$/i.test(f.name || "")) {
+        return toast("That file isn't a .csv, .tsv or .txt sheet. Export the responses as CSV and upload that.", "x");
+      }
+      let text;
+      try { text = await f.text(); }
+      catch { return toast("Couldn't read that file. Try exporting it as CSV again.", "x"); }
+      if (text.includes("\0")) {
+        return toast("That file looks binary, not a text sheet. Export the responses as CSV and upload that.", "x");
+      }
+      loadRows(state, text, f.name);
     });
     slot.querySelector("#pasteBtn").addEventListener("click", () => {
       const box = slot.querySelector("#pasteBox");
@@ -1080,7 +1120,10 @@ async function generate(state) {
     // Newly generated passes start unmarked; keep any markers already stored.
     state.waSent = new Set(state.passes.filter((p) => p.wa_sent_at).map((p) => p.id));
     const gate = await withTimeout(fb.joinGate(state.ev.gate_code));
-    if (gate) state.total = gate.counts.total;
+    // Unified dashboards recount from the list itself (it now includes any
+    // passes just generated); legacy ones keep the gate doc's total.
+    if (state.unified) state.total = state.passes.length;
+    else if (gate) state.total = gate.counts.total;
   } catch {}
   renderReg(state); renderStat(state); renderPassTools(state); renderList(state);
 }
@@ -1093,7 +1136,8 @@ function renderStat(state, bump = false) {
     <span class="dot">${I.dotCheck}</span>
     <p class="stat-label">Checked in</p>
     <div class="stat-line"><p class="stat-num ink" id="snum">${checked} / ${total}</p><div class="bar" aria-hidden="true"><i style="--p:${total ? Math.min(1, checked / total) : 0}"></i></div></div>
-    ${state.bounced ? `<p class="stat-note">${plural(state.bounced, "repeat scan")} bounced at the gate</p>` : ""}`;
+    ${state.bounced ? `<p class="stat-note">${plural(state.bounced, "repeat scan")} bounced at the gate</p>` : ""}
+    ${state.stampError ? `<p class="stat-note err">${esc(state.stampError)}</p>` : ""}`;
   el.setAttribute("aria-label", `Checked in ${checked} of ${total}`);
   if (bump) { const n = el.querySelector("#snum"); n.animate([{ transform: "scale(1.08)", color: "#D4107F" }, { transform: "scale(1)" }], { duration: 520, easing: "cubic-bezier(.16,1,.3,1)" }); }
 }
@@ -1212,7 +1256,11 @@ function renderPassTools(state) {
   // (waSentAt), so the count survives reloads; "marked as sent" means the
   // draft was opened — GatePass never sends a message by itself.
   const waStatus = () => {
-    const done = state.waSent.size, total = waPasses(state).length;
+    // Both numbers describe the SAME subset — passes with a phone number —
+    // and the label says so: "0 of 3" used to sit next to a 5-pass header
+    // and read as if two people had been forgotten (live test, 27 Nov).
+    const wa = waPasses(state);
+    const done = wa.filter((p) => state.waSent.has(p.id)).length, total = wa.length;
     const statusEl = el.querySelector("#waStatus");
     const nextBtn = el.querySelector("#waNext");
     if (!total) {
@@ -1220,12 +1268,12 @@ function renderPassTools(state) {
       nextBtn.disabled = true;
       return;
     }
-    const next = waPasses(state).find((p) => !state.waSent.has(p.id) && sendHref(state, p)?.href);
+    const next = wa.find((p) => !state.waSent.has(p.id) && sendHref(state, p)?.href);
     statusEl.textContent = done >= total
-      ? `All ${total} marked as sent. Reopen any row's WhatsApp button to resend one.`
+      ? `All ${total} with phone numbers marked as sent. Reopen any row's WhatsApp button to resend one.`
       : next
-        ? `${done} of ${total} marked as sent — next: ${next.name}.`
-        : `${done} of ${total} marked as sent — the rest have numbers WhatsApp can't open; use Email or Copy link for those.`;
+        ? `${done} of ${total} with phone numbers marked as sent — next: ${next.name}.`
+        : `${done} of ${total} with phone numbers marked as sent — the rest have numbers WhatsApp can't open; use Email or Copy link for those.`;
     nextBtn.disabled = !next;
   };
   state.refreshWa = waStatus;
@@ -1244,13 +1292,17 @@ function renderPassTools(state) {
   el.querySelector("#filter").addEventListener("input", (e) => { clearTimeout(t); t = setTimeout(() => { state.filter = e.target.value; state.shown = 120; renderList(state); }, 120); });
 }
 
+// Where a pass came from, in the organiser's words. Legacy (v1) passes
+// carry no source field — they were all sheet-issued from this dashboard.
+const PASS_SOURCE = { organiser: "Added by you", rsvp: "RSVP", guest: "Guest RSVP" };
+
 function rowHtml(state, p) {
   const s = state.first.get(p.id);
   const send = sendHref(state, p);
   return `
     <li data-id="${p.id}">
       <p class="pl-name">${esc(p.name)}</p>
-      <p class="pl-meta">${s ? `<span class="in">In ${esc(fmtTime(s.scanned_at))} · ${esc(s.gate)}</span> · ` : ""}${esc(p.contact || "no contact")}${state.waSent.has(p.id) ? ` · WhatsApp marked sent` : ""}</p>
+      <p class="pl-meta">${s ? `<span class="in">In ${esc(fmtTime(s.scanned_at))} · ${esc(s.gate)}</span> · ` : ""}<span class="pl-src">${PASS_SOURCE[p.source] || "Added by you"}</span> · ${esc(p.contact || "no contact")}${state.waSent.has(p.id) ? ` · WhatsApp marked sent` : ""}</p>
       <div class="pl-actions">
         ${send ? (send.email
           ? `<button class="icon-btn" type="button" data-email="${esc(p.token)}" aria-label="Email ${esc(p.name)} their pass photo" title="Email pass photo">${send.icon}</button>`
@@ -1344,6 +1396,23 @@ function renderList(state) {
 }
 
 // ── live updates ──
+// Stamp-sync failures used to vanish into .catch(() => {}) — a denied
+// mirror write looked exactly like success from the dashboard (27 Nov
+// 2026: the claim existed, the scanner showed the check-in, and the pass
+// page never updated, three live tests in a row). Surface them instead:
+// console for devtools, a throttled toast for the organiser, and — on the
+// event dashboard — the persistent hint renderStat draws from
+// state.stampError.
+let lastStampToast = 0;
+function surfaceStampError(where, e) {
+  console.error(`[GatePass] ${where} failed:`, e);
+  const now = Date.now();
+  if (now - lastStampToast > 60000) {
+    lastStampToast = now;
+    toast("Couldn't sync check-in stamps to the pass pages.", "x");
+  }
+}
+
 function startLive(state) {
   stopLive();
   let refreshing = false, again = false, active = true, lastBounced = state.bounced;
@@ -1363,23 +1432,34 @@ function startLive(state) {
         for (const claim of claims) if (claim.is_first) state.first.set(claim.pass_id, claim);
         state.checked = state.first.size;
         state.bounced = lastBounced;
-        renderStat(state, state.checked !== prevChecked || state.bounced !== prevBounced);
-        renderList(state);
-        // Mirror new claims onto the pass docs (an owner-only write) so the
-        // pass pages show "Checked in" under the hardened rules, where gate
-        // scans no longer stamp the pass doc themselves. This must run for
-        // BOTH event kinds: v2 passes previously "relied on" the gate's
-        // best-effort stamp, but gate staff are signed out and the rules
-        // deny that write — so a scanned v2 pass page NEVER updated (live
-        // test, 27 Nov 2026). The claim stays the only scan authority; this
-        // is purely its attendee-visible mirror. (For v2 the write needs
-        // the stamp grant in firestore.rules — see the gp_passes match.)
+        // Mirror new claims onto the pass docs so the pass pages show
+        // "Checked in": gate scans write the claim (the only scan
+        // authority), and this mirror is its attendee-visible copy for
+        // every scan the gate-side projection couldn't stamp (older rule
+        // sets, or a scan whose projection write was interrupted). This
+        // must run for BOTH event kinds — v2 passes previously "relied on"
+        // the gate's best-effort stamp, but gate staff are signed out and
+        // the old rules denied that write, so a scanned v2 pass page NEVER
+        // updated (live test, 27 Nov 2026).
+        // The mirror runs FIRST, before any rendering, and its errors are
+        // surfaced, never swallowed: a render throw must not be able to
+        // starve it, and a denied write (e.g. the published rules lagging
+        // the repo's) must be visible instead of looking exactly like
+        // success — the combination that hid this bug for three live
+        // tests. Failed passes stay unmarked so the next refresh retries.
         const fresh = claims.filter((c) => c.is_first && !state.stamped.has(c.pass_id));
         if (fresh.length) {
-          fb.stampPassesFromClaims(state.passes, fresh)
-            .then(() => fresh.forEach((c) => state.stamped.add(c.pass_id)))
-            .catch(() => {});
+          try {
+            await fb.stampPassesFromClaims(state.passes, fresh);
+            fresh.forEach((c) => state.stamped.add(c.pass_id));
+            state.stampError = "";
+          } catch (e) {
+            state.stampError = "Check-in stamps aren't reaching the pass pages. If this keeps showing, the Firestore rules on the Firebase project are out of date — re-publish firestore.rules from the repo.";
+            surfaceStampError("dashboard stamp mirror", e);
+          }
         }
+        renderStat(state, state.checked !== prevChecked || state.bounced !== prevBounced);
+        renderList(state);
       } while (again);
     } finally {
       refreshing = false;
@@ -1394,6 +1474,10 @@ function startLive(state) {
   window.addEventListener("gp-stats", onStats);
   live = () => { active = false; window.removeEventListener("gp-stats", onStats); fb.stopStats(); };
   fb.gateStats(state.ev.gate_code);
+  // Run one refresh immediately: claims that already exist when the
+  // dashboard opens must be mirrored now, not only when the next gate-doc
+  // snapshot happens to land.
+  refresh();
 }
 function stopLive() {
   if (live) { live(); live = null; }
@@ -1402,4 +1486,5 @@ function stopLive() {
 }
 
 paintIcons();
+wireThemeToggles();
 boot().catch(fail);

@@ -2,7 +2,7 @@
 // sub-event, and lands straight on their QR pass. All Firestore writes live in
 // firebase.js; this module owns only the screen state and the friendly copy.
 import {
-  configured, passUrl, fmtWhen, esc, escT, setArt, toast, I, DB_MSG,
+  configured, passUrl, fmtWhen, esc, escT, setArt, toast, I, DB_MSG, wireThemeToggles,
 } from "./core.js";
 import * as fb from "./firebase.js";
 
@@ -229,4 +229,5 @@ function wireForm() {
   });
 }
 
+wireThemeToggles();
 boot();

@@ -11,6 +11,19 @@
 <link rel="preload" href="../assets/fonts/oswald-latin-wght.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="../assets/css/gatepass.css">
 <link rel="stylesheet" href="../assets/css/luma.css">
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem("gp-theme");
+    if (t && t.charAt(0) === '"') t = JSON.parse(t);
+    if (t === "dark") {
+      document.documentElement.dataset.theme = "dark";
+      var m = document.querySelector('meta[name="theme-color"]');
+      if (m) m.setAttribute("content", "#12121C");
+    }
+  } catch (e) {}
+})();
+</script>
 <script type="importmap">
 {"imports":{
   "firebase/app":"https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js",
@@ -40,6 +53,7 @@ STORY: A student opens the link the organiser shared, signs in with Google, type
       </nav>
     </div>
     <div class="l-nav-right">
+      <button class="l-icon-btn gp-theme-toggle" type="button" aria-label="Switch to dark mode" aria-pressed="false" title="Dark mode"><span class="ic-moon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 13.6A8.4 8.4 0 1 1 10.4 4a6.9 6.9 0 0 0 9.6 9.6z"/></svg></span><span class="ic-sun"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5 5l1.7 1.7M17.3 17.3 19 19M19 5l-1.7 1.7M6.7 17.3 5 19"/></svg></span></button>
       <button class="l-icon-btn" data-action="clock" title="Local time" aria-label="Local time"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg></button>
       <span class="l-clock" id="l-clock"></span>
       <button class="l-icon-btn" data-action="notify" title="Notifications" aria-label="Notifications"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9z"/><path d="M10 21h4"/></svg></button>
@@ -65,7 +79,10 @@ STORY: A student opens the link the organiser shared, signs in with Google, type
 setTimeout(function () {
   var sk = document.getElementById("boot-skeleton");
   if (!sk) return;
-  sk.outerHTML = '<section class="empty" role="alert"><h3>Still loading</h3><p class="sub">Registration is taking a long time to start. Check your connection, then reload.</p><p style="margin-top:14px"><button class="btn small" type="button" onclick="location.reload()">Reload</button></p></section>';
+  sk.outerHTML = '<section class="empty" role="alert"><h3>Still loading</h3><p class="sub">Registration is taking a long time to start. Check your connection, then reload.</p><p style="margin-top:14px"><button class="btn small" type="button" id="boot-reload">Reload</button></p></section>';
+  // The CSP blocks inline handlers, so wire the Reload button from here.
+  var b = document.getElementById("boot-reload");
+  if (b) b.addEventListener("click", function () { location.reload(); });
 }, 10000);
 </script>
 </body>

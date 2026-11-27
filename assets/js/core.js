@@ -54,6 +54,36 @@ export const store = {
   del(k) { try { localStorage.removeItem(k); } catch {} },
 };
 
+// ── theme: light is the site's identity; dark is a per-device opt-in ──
+// The <head> inline script stamps data-theme="dark" on <html> before first
+// paint when the stored gp-theme says so; these helpers own it from then on.
+export const themeNow = () => (document.documentElement.dataset.theme === "dark" ? "dark" : "light");
+export function applyTheme(t) {
+  const dark = t === "dark";
+  if (dark) document.documentElement.dataset.theme = "dark";
+  else delete document.documentElement.dataset.theme;
+  store.set("gp-theme", dark ? "dark" : "light");
+  const m = document.querySelector('meta[name="theme-color"]');
+  if (m) m.setAttribute("content", dark ? "#12121C" : "#F6F1EF");
+  document.querySelectorAll(".gp-theme-toggle").forEach(syncThemeToggle);
+  window.dispatchEvent(new CustomEvent("gp-themechange", { detail: { theme: dark ? "dark" : "light" } }));
+}
+export function syncThemeToggle(btn) {
+  const dark = themeNow() === "dark";
+  btn.setAttribute("aria-pressed", String(dark));
+  btn.setAttribute("aria-label", dark ? "Switch to light mode" : "Switch to dark mode");
+  btn.title = dark ? "Light mode" : "Dark mode";
+}
+export function wireThemeToggles(root = document) {
+  root.querySelectorAll(".gp-theme-toggle").forEach((btn) => {
+    if (!btn.dataset.wired) {
+      btn.dataset.wired = "1";
+      btn.addEventListener("click", () => applyTheme(themeNow() === "dark" ? "light" : "dark"));
+    }
+    syncThemeToggle(btn);
+  });
+}
+
 // ── clipboard ──
 export async function copyText(text) {
   try { await navigator.clipboard.writeText(text); return true; } catch {}

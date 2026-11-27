@@ -526,17 +526,26 @@ export async function scanToken(code, token, gateName, device) {
       throw e;
     }
   }
-  // Best-effort pass-page stamp. The claim above is the ONLY authority for
-  // "checked in" — but the attendee's pass page reads its "Checked in" stamp
-  // from the pass doc, and rule sets deployed before the 22 Nov 2026
-  // hardening let the gate write that stamp (that was the original design).
-  // Hardened rules deny this write (owner-only); the denial is swallowed so
-  // scanning never depends on it. Where the write is denied, the organiser
-  // dashboard mirrors claims onto pass docs for legacy events instead (see
-  // stampPassesFromClaims), and the gate still blocks every repeat scan.
+  // Best-effort pass-page stamp, written as an exact projection of the
+  // claim: the attendee's pass page reads its "Checked in" stamp from the
+  // pass doc, and the rules' claim-bound projection grant accepts this
+  // write from anyone (including this signed-out gate phone) only when
+  // the values are byte-identical to the committed claim's scannedAt/gate
+  // and the pass is still unstamped — so the stamp lands at scan time,
+  // with no organiser dashboard needing to be open. Rule sets published
+  // before that grant deny the write; the denial is swallowed so scanning
+  // never depends on it, and the organiser dashboard's mirror
+  // (stampPassesFromClaims) remains the backstop. The claim stays the
+  // ONLY authority for "checked in" — the gate blocks every repeat scan
+  // from it, never from this stamp.
   if (result?.status === "ok") {
     try {
-      await updateDoc(passRef, { checkedInAt: serverTimestamp(), gate: gateName });
+      const claim = await getDoc(claimRef);
+      if (claim.exists()) {
+        await updateDoc(passRef, {
+          checkedInAt: claim.data().scannedAt, gate: claim.data().gate || gateName,
+        });
+      }
     } catch { /* cosmetic stamp only — the claim is the authority */ }
   }
   return result;
@@ -823,7 +832,15 @@ async function revokePassBatch(batch, eventId, uid) {
   }
   const ev = await getDoc(doc(db, V2, eventId));
   const gateCode = ev.exists() ? ev.data().gateCode : null;
-  if (gateCode) batch.delete(doc(db, GATES, gateCode, "roster", uid));
+  if (gateCode) {
+    batch.delete(doc(db, GATES, gateCode, "roster", uid));
+    // Keep the gate doc's total == live passes: issuePassBatch incremented
+    // it when this pass was issued, so revoking the pass decrements it.
+    // The gate scanner and the organiser dashboard both take their totals
+    // from this same universe; without the decrement they drift apart
+    // after every rejection/cancellation.
+    if (tokenSnap.exists()) batch.update(doc(db, GATES, gateCode), { total: increment(-1) });
+  }
 }
 
 export async function createV2Event(row) {
@@ -969,6 +986,10 @@ export async function rsvpEvent(eventId, user, answers = {}) {
     phone: answers.phone ?? "",
     college: answers.college ?? "",
     answers,
+    // How this RSVP arrived, so the organiser dashboard can label the pass
+    // ("Guest RSVP" vs "RSVP"). The user object is already here; anonymous
+    // auth is exactly the guest flow. Older RSVPs have no field → "RSVP".
+    via: u.isAnonymous ? "guest" : "account",
     status,
     at: serverTimestamp(),
     createdAt: serverTimestamp(),
@@ -1095,6 +1116,8 @@ export async function listRsvps(eventId) {
       phone: r.phone || "", college: r.college || "",
       answers: r.answers || {},
       status: r.status || "approved",
+      via: r.via || "",
+      wa_sent_at: stamp(r.waSentAt),
       at: stamp(r.at),
       created_at: stamp(r.createdAt),
       updated_at: stamp(r.updatedAt),
@@ -1155,6 +1178,45 @@ export async function markOrganiserPassWaSent(eventId, passId) {
     p.id === passId ? { ...p, waSentAt: at } : p);
   await updateDoc(ref, { passes: rows });
   return at;
+}
+
+// RSVP-issued passes for the organiser dashboard, shaped exactly like the
+// getOrganiserPasses rows so the dashboard renders ONE pass list. An RSVP
+// becomes a pass only when one was issued (approved): pending/rejected
+// RSVPs hold no token and are skipped — they are managed from the event
+// page's member list, not the pass list. The token read is the owner-only
+// read getMemberPass uses, resolved per member in parallel; ownership is
+// verified once up front instead of per member.
+export async function getRsvpPasses(eventId) {
+  const by = auth.currentUser?.uid;
+  if (!by) throw new Error("Sign in required");
+  const ev = await getDoc(doc(db, V2, eventId));
+  if (!ev.exists() || ev.data().ownerId !== by) throw new Error("Only the host can list RSVP passes");
+  const rsvps = await listRsvps(eventId);
+  const rows = await Promise.all(rsvps.map(async (r) => {
+    if (r.status !== "approved") return null;
+    const tok = await getDoc(doc(db, "gp_pass_tokens", eventId, "tokens", r.uid));
+    const token = tok.exists() ? tok.data().passToken : null;
+    if (!token) return null;
+    return {
+      id: r.uid, name: r.name || "",
+      contact: r.phone || r.email || "",
+      email: r.email || "", phone: r.phone || "",
+      token, created_at: r.created_at || r.at || "",
+      wa_sent_at: r.wa_sent_at || "",
+      source: r.via === "guest" ? "guest" : "rsvp",
+    };
+  }));
+  return rows.filter(Boolean);
+}
+
+// WhatsApp "marked sent" stamp for an RSVP-issued pass: a field on the
+// RSVP doc itself (same pattern as fest registrations' waSentAt). The
+// owner may update RSVP docs (updateRsvp already relies on that).
+export async function markRsvpWaSent(eventId, uid) {
+  if (!auth.currentUser?.uid) throw new Error("Sign in required");
+  await updateDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid), { waSentAt: serverTimestamp() });
+  return new Date().toISOString();
 }
 
 export async function generatePassesV2(eventId, rows, { gateCode, publicEvent }) {

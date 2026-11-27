@@ -931,7 +931,11 @@ body.luma .btn-primary .tix svg, body.luma .row > span > svg { width: 100%; heig
 }
 @media (max-width: 640px) {
   body.luma .l-nav { height: 56px; }
-  body.luma .l-link { height: 56px; font-size: 12px; gap: 0; padding: 0 5px; }
+  body.luma .l-link { height: 56px; font-size: 11.5px; gap: 0; padding: 0 3px; }
+  /* phone header room: the current page's own link steps aside (you are
+     already there) and the brand is the pink dot alone, so the links,
+     the theme toggle and the create button never overlap */
+  body.luma .l-link.is-active { display: none; }
   body.luma .l-link svg { display: none; }
   body.luma .l-nav-left { gap: 10px; }
   body.luma .l-nav-right { gap: 6px; }
@@ -939,7 +943,7 @@ body.luma .btn-primary .tix svg, body.luma .row > span > svg { width: 100%; heig
   body.luma .l-icon-btn[data-action="clock"], body.luma .l-icon-btn[data-action="notify"] { display: none; }
   /* organiser nav on a phone: keep the sign-out button, drop the word */
   body.luma .l-role { font-size: 0; gap: 0; }
-  body.luma .l-brand-mini { display: inline; }
+  body.luma .l-brand-mini { display: none; }
   body.luma .l-create span, body.luma .l-signin-nav span { display: none; }
   body.luma .l-create, body.luma .l-signin-nav {
     width: 40px; padding: 0; justify-content: center; flex: none;
@@ -975,4 +979,143 @@ body.luma .btn-primary .tix svg, body.luma .row > span > svg { width: 100%; heig
     animation-duration: .01ms !important; animation-iteration-count: 1 !important;
     transition-duration: .01ms !important;
   }
+}
+
+/* ── dark mode ───────────────────────────────────────────────────
+   The same luma design after dark: deep charcoal stock, the same two
+   inks brightened for dark ground, verdict inks lifted to the values
+   gatepass.css's own dark stock uses. Light stays the default; dark is
+   a per-device opt-in — the <head> script stamps data-theme="dark" on
+   <html> before first paint, so this section keys off <html>, and the
+   toggle in every page header flips it (core.js wireThemeToggles). */
+.gp-theme-toggle .ic-sun { display: none; }
+html[data-theme="dark"] .gp-theme-toggle .ic-sun { display: inline-flex; }
+html[data-theme="dark"] .gp-theme-toggle .ic-moon { display: none; }
+
+html[data-theme="dark"] body.luma {
+  /* charcoal stock */
+  --l-paper: #14141D;
+  --l-paper-hi: #1E1E2B;
+  --l-desk: #262633;
+  /* deep blue ink, brightened to print on charcoal */
+  --l-ink: #B9C8FF;
+  --l-ink-deep: #8EA6FF;
+  --l-ink-soft: #A9B4D8;
+  --l-ink-line: rgba(175, 192, 255, .30);
+  --l-ink-fill: #2B4BD8;          /* filled plates stay deep so white text still reads */
+  --l-ink-fill-hover: #3A5BE0;
+  /* fluoro pink ink, same hue, lifted text values */
+  --l-pink: #FF4FB8;
+  --l-pink-ink: #FF7DC9;
+  --l-pink-display: #FF69C5;
+  --l-pink-tint: #2A1B33;
+  --l-pink-tint-2: #2A1B36;
+  --l-pink-track: #3C2450;
+  /* verdicts on dark stock */
+  --l-go: #2FA866;
+  --l-go-tint: #14382A;
+  --l-go-ink: #6DE3A0;
+  --l-stop: #FF5470;
+  --l-stop-tint: #3A1826;
+  --l-stop-ink: #FF8FA5;
+  --l-warn-tint: #3D2E12;
+  --l-warn-ink: #F2C063;
+
+  /* the gatepass palette remap, dark values (the stock :root set) */
+  --paper: #14141D;
+  --paper-hi: #1E1E2B;
+  --desk: #0E0E15;
+  --blue: #AFC0FF;
+  --blue-deep: #8EA6FF;
+  --blue-soft: #A9B4D8;
+  --blue-line: rgba(175, 192, 255, .30);
+  --pink: #FF4FB8;
+  --pink-ink: #FF7DC9;
+  --pink-tint: #2A1B33;
+  --pink-tint-2: #2A1B36;
+  --pink-track: #3C2450;
+  --pink-display: #FF69C5;
+  --pink-note: #FF9BD6;
+  --go: #1B7A4B;
+  --stop: #FF5470;
+  --stop-tint: #3A1826;
+  --go-ink: #6DE3A0;
+  --stop-ink: #FF8FA5;
+
+  color-scheme: dark;
+}
+
+/* nav stock was a translucent paper wash; on charcoal it is a dark wash */
+html[data-theme="dark"] body.luma .l-nav { background: rgba(16, 16, 24, .92); }
+
+/* filled blue plates: the fill stays deep (text on them is white) even
+   though the ink colour itself brightens for text duty */
+html[data-theme="dark"] body.luma .l-create,
+html[data-theme="dark"] body.luma .l-primary,
+html[data-theme="dark"] body.luma .l-chip.is-active,
+html[data-theme="dark"] body.luma .l-gate-panel,
+html[data-theme="dark"] body.luma .toast,
+html[data-theme="dark"] body.luma .l-seg input:checked + span,
+html[data-theme="dark"] body.luma .l-cal-nav button:hover { background-color: var(--l-ink-fill); }
+html[data-theme="dark"] body.luma .l-create:hover,
+html[data-theme="dark"] body.luma .l-primary:hover { background-color: var(--l-ink-fill-hover); }
+html[data-theme="dark"] body.luma .toast { border-color: rgba(175, 192, 255, .40); }
+
+/* avatar initials sit on the brightened ink, so they print dark again */
+html[data-theme="dark"] body.luma .l-av { color: #14141F; }
+
+/* scrims that faded art into paper now fade it into charcoal */
+html[data-theme="dark"] body.luma .l-card-cover::after {
+  background: linear-gradient(180deg, rgba(20, 20, 29, .06) 0%, rgba(20, 20, 29, 0) 30%, rgba(20, 20, 29, .72) 70%, rgba(20, 20, 29, .97) 100%);
+}
+html[data-theme="dark"] body.luma .l-detail-cover::after {
+  background: linear-gradient(180deg, transparent 55%, rgba(20, 20, 29, .45));
+}
+html[data-theme="dark"] body.luma .l-cover-preview::after {
+  background: linear-gradient(180deg, rgba(20, 20, 29, .4), transparent 45%);
+}
+html[data-theme="dark"] body.luma .poster::before {
+  background: linear-gradient(180deg, rgba(16, 16, 24, .88), rgba(16, 16, 24, 0));
+}
+
+/* focused fields lifted to a raised surface instead of white */
+html[data-theme="dark"] body.luma .l-search:focus,
+html[data-theme="dark"] body.luma .input:focus,
+html[data-theme="dark"] body.luma .textarea:focus,
+html[data-theme="dark"] body.luma .select:focus { background: #262638; }
+html[data-theme="dark"] body.luma .l-danger:hover { background: #4A1E2C; }
+
+/* the select chevron is an ink-coloured data-uri; swap in the bright ink */
+html[data-theme="dark"] body.luma .select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%23AFC0FF' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E");
+}
+
+/* gatepass plates whose light-theme overrides assumed a deep-blue fill:
+   the fill is bright periwinkle now, so their text prints dark again */
+html[data-theme="dark"] body.luma .btn-primary { color: #14141F; }
+html[data-theme="dark"] body.luma .btn-primary:hover { color: #14141F; }
+html[data-theme="dark"] body.luma .btn-primary .label small { color: rgba(20, 20, 31, .7); }
+html[data-theme="dark"] body.luma .gatebox { color: #14141F; }
+html[data-theme="dark"] body.luma .gatebox .fine { color: rgba(20, 20, 31, .78); }
+html[data-theme="dark"] body.luma .gatebox .btn { border-color: rgba(20, 20, 31, .55); color: #14141F; }
+html[data-theme="dark"] body.luma .gatebox .btn:hover { background: rgba(20, 20, 31, .1); color: #14141F; }
+html[data-theme="dark"] body.luma .chip input:checked + span { color: #14141F; }
+html[data-theme="dark"] body.luma .scan-gate { color: #14141F; }
+
+/* hover washes were tuned for paper; use the dark stock's own values */
+html[data-theme="dark"] body.luma .row:hover,
+html[data-theme="dark"] body.luma .stub:hover { background-color: #352444; }
+html[data-theme="dark"] body.luma .btn:hover { background: rgba(175, 192, 255, .12); }
+
+/* the checked-in stamp printed on a paper chip; now on a charcoal chip,
+   its blue ink and border are the brightened values and stay readable */
+html[data-theme="dark"] body.luma .t-stamp > div { background: rgba(20, 20, 29, .92); }
+
+/* QR codes stay on a white card in both themes — dark blue modules on
+   dark stock would not scan */
+html[data-theme="dark"] body.luma .t-qr svg {
+  background: #fff; border-radius: 12px; padding: 12px;
+}
+html[data-theme="dark"] body.luma .gate-qr svg {
+  background: #fff; border-radius: 8px; padding: 6px;
 }

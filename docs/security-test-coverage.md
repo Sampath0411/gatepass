@@ -49,3 +49,42 @@ npm run test:e2e
 Gate roster rows still carry the raw pass token and are readable by anyone with
 the gate code (needed for the current phone-only find-by-name flow). Fully
 hiding that token requires a server-side scan endpoint / Cloud Function.
+
+## Addendum — stamp reliability + CSP repair (28 Nov 2026)
+
+- **Claim-bound stamp projection (firestore.rules).** A new `gp_passes`
+  update grant lets any caller write `checkedInAt`/`gate` only as an exact
+  copy of an existing claim for that pass under its event's gate code, and
+  only while the pass is unstamped (`stampMatchesClaim` + v1/v2/fest
+  resolvers). The gate now projects the claim onto the pass doc at scan
+  time, so the pass page stamps without the organiser dashboard being
+  open. Forgery is impossible through the grant: both values are pinned
+  to the claim, whose create rule is unchanged. Covered by
+  `tests/stamp-diag.test.js` P1–P6 (exact copy succeeds signed-out; wrong
+  time, wrong gate, already-stamped, extra field, missing claim all
+  fail) — written for the emulator suite; run `npm run test:rules` where
+  the emulator transport works. **Requires re-publishing firestore.rules**
+  to take effect; under older published rules the projection write is
+  denied and the dashboard mirror remains the backstop.
+- **Mirror surfacing (organiser.js).** The dashboard stamp mirror runs
+  before rendering, is awaited, retries unmarked passes, and reports
+  failures (console + toast + a persistent hint in the stats box) instead
+  of swallowing them — a denied mirror write previously looked exactly
+  like success, which hid the Nov 27 stamp failure for three live tests.
+- **CSP watchdog repair (vercel.json + page shells).** The CSP's second
+  script hash matched nothing in the tree, so the inline clock/boot
+  watchdog scripts on the organiser, gate, pass and register pages were
+  blocked in production and the stuck-skeleton fallback never ran; its
+  Reload button also used an inline `onclick` the CSP blocks. The
+  watchdogs now wire their buttons with `addEventListener`, and the CSP
+  pins the importmap hash plus all four page-script hashes.
+- **Upload hardening (organiser.js).** The registrations file input now
+  enforces the .csv/.tsv/.txt allowlist in code (the `accept` attribute
+  is only a picker hint), catches read errors, and rejects NUL-byte
+  binary content with a clean message. Size cap (4 MB) and row cap
+  (5,000) were already in place.
+- XSS surface re-audited end to end (events, organiser, gate, pass,
+  register): every user-controlled interpolation goes through `esc`/
+  `escT`; payload tests render inert in the fake-SDK browser harness.
+  CSV exports already neutralised formula injection; the Sheets sync URL
+  is pinned to `*.google.com` + `/spreadsheets/d/`.
