@@ -5,11 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Your pass · GatePass</title>
 <meta name="description" content="Your entry pass. Show the QR at the gate.">
-<meta name="theme-color" content="#12121C">
+<meta name="theme-color" content="#F6F1EF">
 <meta name="referrer" content="no-referrer">
 <link rel="icon" href="../assets/img/icon.svg" type="image/svg+xml">
 <link rel="preload" href="../assets/fonts/oswald-latin-wght.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="../assets/css/gatepass.css">
+<link rel="stylesheet" href="../assets/css/luma.css">
 <script type="importmap">
 {"imports":{
   "firebase/app":"https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js",
@@ -20,25 +21,55 @@
 <script defer src="../firebase-config.js"></script>
 <script type="module" src="../assets/js/pass.js"></script>
 </head>
-<body>
+<body class="luma">
 <!--
 THESIS: A pass is a printed gig ticket, not a QR in a card. The ticket IS the page: scalloped stock, a riso crowd strip, the name in blue ink, the event in fluoro pink, one big QR and a tear-off stub. Refuses the e-ticket template (logo bar, grey card, small QR, details table).
-OWN-WORLD: Warm paper #F3EBEA with fibre grain; two riso inks, fluoro pink #FF2FA2 and deep blue #1A43B4, with paper dropouts on every filled surface; Oswald condensed print voice, Barlow Semi Condensed for anything read at length; scalloped and perforated edges; dotted pink rules.
+OWN-WORLD: Warm paper #F3EBEA with fibre grain; two riso inks, fluoro pink #FF2FA2 and deep blue #1A43B4, with paper dropouts on every filled surface; Oswald condensed print voice, Barlow Semi Condensed for anything read at length; scalloped and perforated edges; dotted pink rules. Same light luma design as the events homepage (assets/css/luma.css); the ticket stock is the same paper, printed with the same inks.
 STORY: Organiser uploads a sheet and gets a pass per row; attendee opens a link and shows the ticket; a gate phone turns green once and red forever after.
-FIRST VIEWPORT: (pass) Centered GatePass wordmark, then the full-width ticket: crowd art strip, name ~48px blue, pink rule, event title ~44px pink uppercase, date and venue, QR ~250px, dotted tear line with side notches, "Show this at the gate".
+FIRST VIEWPORT: (pass) The shared GatePass header, then the full-width ticket: crowd art strip, name ~48px blue, pink rule, event title ~44px pink uppercase, date and venue, QR ~250px, dotted tear line with side notches, "Show this at the gate".
 FORM: Pinned by the user: concept A "gig poster" (ui-concepts/gatepass/gatepass_a_gigposter.png, chosen 11 Nov 2026), comp-led. No seed roll: a user-pinned direction beats the roll.
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
 -->
-<main class="app">
-  <header class="mast mast-center">
-    <a class="logo ink" href="../">GatePass</a>
-  </header>
-
-  <div id="view" aria-live="polite">
-    <div class="skeleton" style="height:min(150vw,720px)" aria-label="Loading your pass"></div>
+<header class="l-nav">
+  <div class="l-nav-inner">
+    <div class="l-nav-left">
+      <a class="l-brand" href="../" aria-label="Home"><span class="l-brand-dot"></span><span class="l-brand-name">GatePass</span><span class="l-brand-mini">GP</span><span class="l-brand-sub">Events</span></a>
+      <span class="l-nav-sep"></span>
+      <nav class="l-links" aria-label="Primary">
+        <a class="l-link" href="../"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.4"/><rect x="14" y="3" width="7" height="7" rx="1.4"/><rect x="3" y="14" width="7" height="7" rx="1.4"/><rect x="14" y="14" width="7" height="7" rx="1.4"/></svg><span>Events</span></a>
+        <a class="l-link" href="../#/calendar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg><span>Calendars</span></a>
+        <a class="l-link" href="../#/discover"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></svg><span>Discover</span></a>
+        <a class="l-link" href="../organiser/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M8 6v12M16 6v12"/></svg><span>Organiser</span></a>
+      </nav>
+    </div>
+    <div class="l-nav-right">
+      <button class="l-icon-btn" data-action="clock" title="Local time" aria-label="Local time"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg></button>
+      <span class="l-clock" id="l-clock"></span>
+      <button class="l-icon-btn" data-action="notify" title="Notifications" aria-label="Notifications"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9z"/><path d="M10 21h4"/></svg></button>
+      <a class="l-create" href="../#/create"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Create Event</span></a>
+    </div>
   </div>
-
-  <div class="scallops inked" aria-hidden="true"></div>
+</header>
+<main class="app">
+  <div id="view" aria-live="polite">
+    <div class="skeleton" id="boot-skeleton" style="height:min(150vw,720px)" aria-label="Loading your pass"></div>
+  </div>
 </main>
+<script>
+(function () {
+  var el = document.getElementById("l-clock");
+  if (!el) return;
+  var tick = function () { el.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); };
+  tick();
+  setInterval(tick, 20000);
+})();
+// Boot watchdog: if the pass never replaces the first skeleton (CDN or
+// network stall), say so instead of leaving a blank panel forever.
+setTimeout(function () {
+  var sk = document.getElementById("boot-skeleton");
+  if (!sk) return;
+  sk.outerHTML = '<section class="torn" role="alert"><h1>Still loading</h1><p class="sub">Your pass is taking a long time to load. Check your connection, then reload.</p><p style="margin-top:14px"><button class="btn small" type="button" onclick="location.reload()">Reload</button></p></section>';
+}, 10000);
+</script>
 </body>
 </html>

@@ -780,6 +780,137 @@ body.luma .toast {
 }
 body.luma .toast svg { width: 18px; height: 18px; color: #fff; }
 
+/* ── standalone pages (organiser / gate / pass / register) ─────
+   These pages keep their gatepass.css markup and component classes; giving
+   them body.luma remaps the gatepass palette variables to the light luma
+   values, so every component prints in the same two inks on the same paper
+   as the events homepage. The overrides below fix the spots where
+   gatepass.css hardcodes dark-theme values instead of using the variables. */
+body.luma {
+  --paper: #F6F1EF;
+  --paper-hi: #FFFBF9;
+  --desk: #EDE2DD;
+  --blue: #1A43B4;
+  --blue-deep: #123184;
+  --blue-soft: #4C65A8;
+  --blue-line: rgba(26, 67, 180, .28);
+  --pink: #FF2FA2;
+  --pink-ink: #C2117D;
+  --pink-tint: #F8D5E4;
+  --pink-tint-2: #FCEAF2;
+  --pink-track: #EBAFD0;
+  --pink-display: #D4107F;
+  --pink-note: #C2117D;
+  --go: #12844A;
+  --stop: #E0144C;
+  --stop-tint: #FBE0E6;
+  --go-ink: #0E6F3F;
+  --stop-ink: #B50E3B;
+}
+
+/* page frame: same measure and breathing room as .l-main */
+body.luma .app { padding: 26px var(--l-gutter) 90px; }
+body.luma .app > :nth-last-child(2) { margin-bottom: 0; }
+@media (min-width: 980px) {
+  body.luma.wide .app { width: min(100%, 1320px); }
+}
+
+/* the organiser page's account slot in the nav (organiser.js fills #role) */
+body.luma .l-role {
+  display: flex; align-items: center; gap: 6px; white-space: nowrap;
+  font: 600 12px/1 var(--l-f-display); letter-spacing: .12em;
+  text-transform: uppercase; color: var(--l-ink-soft);
+}
+body.luma .l-role .icon-btn { flex: none; }
+
+/* primary plate: deep blue now, so its text prints white (pink keeps dark) */
+body.luma .btn-primary { color: #fff; }
+body.luma .btn-primary:hover { background: var(--blue-deep); color: #fff; }
+body.luma .btn-primary .label small { color: rgba(255, 255, 255, .78); }
+body.luma .btn-primary[disabled] { background: #A9B4D8; color: #fff; }
+body.luma .btn-primary.pink { color: #14141F; }
+body.luma .btn-primary.pink .label small { color: rgba(20, 20, 31, .7); }
+
+/* filled blue chips and plates that used to carry dark text */
+body.luma .gatebox { color: #fff; }
+body.luma .gatebox .fine { color: rgba(255, 255, 255, .85); }
+body.luma .gatebox .btn { border-color: rgba(255, 255, 255, .65); color: #fff; }
+body.luma .gatebox .btn:hover { background: rgba(255, 255, 255, .16); color: #fff; }
+body.luma .chip input:checked + span { color: #fff; }
+body.luma .poster-when { color: #fff; }
+body.luma .scan-gate { color: #fff; }
+body.luma .art-pick .art-name { color: #fff; }
+
+/* hover washes were dark purple; on paper they are a deeper pink tint */
+body.luma .row:hover, body.luma .stub:hover { background-color: #F0BCD8; }
+body.luma .btn:hover { background: rgba(26, 67, 180, .08); }
+body.luma .icon-btn:hover { background: var(--pink-tint-2); }
+body.luma .cam-tools .icon-btn { background: rgba(29, 29, 43, .94); }
+body.luma .cam-tools .icon-btn:hover { background: rgba(29, 29, 43, .94); }
+
+/* forms on paper */
+body.luma .input:focus, body.luma .textarea:focus, body.luma .select:focus { background: #fff; }
+body.luma .input::placeholder, body.luma .textarea::placeholder { color: var(--blue-soft); opacity: .85; }
+body.luma .code-input::placeholder { color: var(--blue-soft); opacity: .7; }
+body.luma .select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%231A43B4' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E");
+}
+
+/* loading skeleton: the luma shimmer, never a dark slab */
+body.luma .skeleton {
+  background: linear-gradient(90deg, var(--pink-tint) 0 40%, var(--pink-tint-2) 50%, var(--pink-tint) 60% 100%) 0 0 / 300% 100%;
+}
+
+/* empty states sit on a paper card, like .l-empty */
+body.luma .empty { background: var(--paper-hi) url("../img/paper.png") 0 0 / 512px 512px; }
+
+/* poster: title prints on a paper scrim over the art, like the feed cards */
+body.luma .poster { border-radius: var(--l-r-row); }
+body.luma .poster::before {
+  background: linear-gradient(180deg, rgba(246, 241, 239, .9), rgba(246, 241, 239, 0));
+}
+body.luma .poster-title { color: var(--pink-display); text-shadow: none; }
+
+/* pass ticket stamp and gate verdicts */
+body.luma .t-stamp > div { background: rgba(246, 241, 239, .94); }
+body.luma .verdict.dup { color: var(--stop-ink); }
+body.luma .verdict.dup .v-sub { color: var(--stop-ink); }
+
+/* checked-in markers anywhere (fest registrations table uses a bare .in) */
+body.luma .in { color: var(--go-ink); font-weight: 700; }
+
+/* button rows outside the gate box get the same wrap as inside it */
+body.luma .btns { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* buttons: luma's global reset (body.luma button { background: none;
+   border: 0; padding: 0 }) outranks the gatepass button classes, so
+   re-state them — otherwise every <button> loses its plate and border
+   (only <a> versions survived). Variants keep their own colours. */
+body.luma .btn { border: 2px solid var(--blue); background: transparent; padding: 10px 18px; }
+body.luma .btn.small { border-width: 1.5px; padding: 8px 12px; }
+body.luma .btn.pinkline { border-color: var(--pink); }
+body.luma .btn.danger { border-color: var(--stop-ink); }
+body.luma .btn-primary { background: var(--blue); padding: 14px 22px; }
+body.luma .btn-primary.compact { padding: 10px 18px; }
+body.luma .btn-primary.pink { background: var(--pink); }
+body.luma .icon-btn { border: 1.5px solid var(--blue-line); background: var(--paper-hi); }
+body.luma .row { background: var(--pink-tint) url("../img/mottle-soft.png") 0 0 / 512px 512px; padding: 12px 18px; }
+
+/* icon sizes: the global body.luma svg rule above (16px) outranks the
+   gatepass component rules, so restore the sizes gatepass.css specifies —
+   most importantly the QR codes and the ticket stock shape, which are
+   functional, not decorative. */
+body.luma .btn svg { width: 20px; height: 20px; }
+body.luma .icon-btn svg { width: 20px; height: 20px; }
+body.luma .backlink svg { width: 18px; height: 18px; }
+body.luma .search svg { width: 20px; height: 20px; }
+body.luma .gate-qr svg { width: 120px; height: 120px; }
+body.luma .t-qr svg { width: min(54vw, 214px); height: auto; aspect-ratio: 1; }
+body.luma .t-shape { width: 100%; height: 100%; }
+body.luma .flash svg { width: min(44vw, 220px); height: auto; }
+body.luma .v-ico svg, body.luma .stat .dot svg, body.luma .row .chev svg,
+body.luma .btn-primary .tix svg, body.luma .row > span > svg { width: 100%; height: 100%; }
+
 /* ── responsive ──────────────────────────────────────────────── */
 @media (max-width: 1080px) {
   body.luma .l-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -802,6 +933,8 @@ body.luma .toast svg { width: 18px; height: 18px; color: #fff; }
   body.luma .l-nav-right { gap: 6px; }
   body.luma .l-brand-name, body.luma .l-brand-sub, body.luma .l-nav-sep, body.luma .l-clock,
   body.luma .l-icon-btn[data-action="clock"], body.luma .l-icon-btn[data-action="notify"] { display: none; }
+  /* organiser nav on a phone: keep the sign-out button, drop the word */
+  body.luma .l-role { font-size: 0; gap: 0; }
   body.luma .l-brand-mini { display: inline; }
   body.luma .l-create span, body.luma .l-signin-nav span { display: none; }
   body.luma .l-create, body.luma .l-signin-nav {
