@@ -5,6 +5,7 @@ import {
   configured as coreConfigured, toast, download, DB_MSG, qrSvg, wireThemeToggles,
 } from "./core.js";
 import { toCsv } from "./csv.js";
+import * as pay from "./payments.js";
 
 const $ = (s, r = document) => r.querySelector(s);
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -661,6 +662,13 @@ async function onSubmit(e) {
     const editing = !!form.dataset.id;
     const id = editing ? (await fb.updateV2Event(form.dataset.id, row), form.dataset.id)
       : await fb.createV2Event(row);
+    if (editing) {
+      // A capacity raise (or a capacity removed entirely) may have
+      // freed waitlist spots: drain the queue before navigating, so
+      // the event page the host lands on already shows the promoted
+      // members as going. Quiet on failure — the dashboard retries.
+      try { await fb.promoteWaitlist(id); } catch (e) { console.warn("promoteWaitlist failed", e); }
+    }
     invalidate();
     toast(editing ? "Event updated" : "Event created", "check");
     location.hash = `#/event/${id}`;
@@ -675,16 +683,50 @@ async function onSubmit(e) {
 // ── detail + RSVP ───────────────────────────────────────────────────────────
 function statusPill(status) {
   const s = status || "approved";
-  const label = s === "pending" ? "Pending" : s === "rejected" ? "Rejected" : "Approved";
+  const label = s === "pending" ? "Pending" : s === "rejected" ? "Rejected"
+    : s === "waitlisted" ? "Waitlisted" : "Approved";
   return `<span class="l-status-pill is-${esc(s)}">${esc(label)}</span>`;
 }
-function passStatusHTML(pass) {
+// The member's payment line for a paid event, under whatever status
+// banner applies. Wording is deliberate: a browser-reported payment is
+// "recorded", never "confirmed" — only the organiser's server-side
+// verifier can confirm it (docs/paid-passes.md).
+function payNoteHTML(pass) {
+  if (pass?.payStatus === "client_paid_unverified") {
+    return `<p class="l-pay-note">${esc(pay.formatPaise(pass.amountPaise))} payment recorded — the organiser's dashboard shows it as PAID (UNVERIFIED) until their payment check runs.</p>`;
+  }
+  if (pass?.payStatus === "verified") {
+    return `<p class="l-pay-note">${esc(pay.formatPaise(pass.amountPaise))} payment verified.</p>`;
+  }
+  return "";
+}
+function passStatusHTML(pass, ev) {
   if (!pass || !pass.status) return "";
+  const amountPaise = pass.amountPaise || pay.parsePricePaise(ev?.price);
+  // Paid but not yet paid: payment comes before everything else on a
+  // paid event (before the approval queue, before the waitlist), so an
+  // unpaid member sees the payment state, not a misleading "awaiting
+  // approval". The Pay button itself sits in the CTA block.
+  if (pass.payStatus === "unpaid" && amountPaise > 0 && !pass.passToken) {
+    if (pass.status === "waitlisted") {
+      return `<div class="l-status-banner is-waitlisted">${IX.clock}<span>This event is full — you're on the waitlist, and your payment is still pending. If a spot opens, you'll need to have paid to claim it.</span></div>`;
+    }
+    if (pass.status === "pending") {
+      return `<div class="l-status-banner is-payment">${I.ticket}<span>Payment pending — pay ${esc(pay.formatPaise(amountPaise))} to ${ev?.approval ? "send your request" : "get your pass"}</span></div>`;
+    }
+  }
   if (pass.status === "pending") {
-    return `<div class="l-status-banner is-pending">${IX.clock}<span>Awaiting approval</span></div>`;
+    return `<div class="l-status-banner is-pending">${IX.clock}<span>Awaiting approval</span></div>${payNoteHTML(pass)}`;
   }
   if (pass.status === "rejected") {
     return `<div class="l-status-banner is-rejected">${IX.close}<span>Request wasn't approved — update and resubmit</span></div>`;
+  }
+  if (pass.status === "waitlisted") {
+    // The position is stamped onto the member's RSVP by the host's
+    // promoteWaitlist pass; until the first stamp lands, the banner
+    // simply omits the number rather than guessing one.
+    const n = pass.waitlistPosition;
+    return `<div class="l-status-banner is-waitlisted">${IX.clock}<span>This event is full — you're${n ? ` #${n}` : ""} on the waitlist. If a spot opens, your pass will appear here.</span></div>${payNoteHTML(pass)}`;
   }
   if (pass.passToken) {
     const url = passUrl(pass.passToken);
@@ -697,9 +739,9 @@ function passStatusHTML(pass) {
       <div class="l-qr-frame">${qrSvg(url, { fg: "#12121C", margin: 2 })}</div>
       <p>Show this QR at the gate</p>
       <a class="l-qr-open" href="${esc(url)}" target="_blank" rel="noopener">Open full pass</a>
-    </div>`;
+    </div>${payNoteHTML(pass)}`;
   }
-  return `<div class="l-status-banner is-approved">${I.check}<span>You're approved</span></div>`;
+  return `<div class="l-status-banner is-approved">${I.check}<span>You're approved</span></div>${payNoteHTML(pass)}`;
 }
 function gatePanelHTML(ev) {
   if (!ev.gate_code) return "";
@@ -718,7 +760,8 @@ function detailHTML(ev, rsvps, mine, owner, full, myPass) {
     // Two ways in: Google (account, pass retrievable anywhere) or guest
     // (no account — the pass link shown after RSVPing is the only copy).
     cta = `<button class="l-google-btn l-block" data-action="signin-rsvp" data-id="${esc(ev.id)}">${I.google} Sign in to RSVP</button>
-      <button class="l-outline l-block" data-action="guest-rsvp" data-id="${esc(ev.id)}" ${full ? "disabled" : ""}>RSVP as guest</button>
+      <button class="l-outline l-block" data-action="guest-rsvp" data-id="${esc(ev.id)}">${full ? "Join the waitlist as guest" : "RSVP as guest"}</button>
+      ${full ? `<p class="l-guest-note">This event is full — RSVP to join the waitlist. If a spot opens, the host's next visit issues your pass and it appears right here.</p>` : ""}
       <p class="l-guest-note">No account? RSVP as a guest — your pass link appears right here afterwards. Save it: without an account, it's the only copy.</p>`;
   } else if (owner) {
     cta = `<div class="l-owner-actions">
@@ -727,15 +770,22 @@ function detailHTML(ev, rsvps, mine, owner, full, myPass) {
       <button class="l-danger l-block" data-action="delete" data-id="${esc(ev.id)}">${I.trash} Delete event</button>
     </div>`;
   } else if (mine) {
+    // An unpaid order on a paid event gets the primary action: paying is
+    // the only thing standing between this member and their pass (or
+    // their place in the approval queue / waitlist).
+    const needsPay = myPass?.payStatus === "unpaid" && !myPass?.passToken
+      && (myPass?.amountPaise || pay.parsePricePaise(ev.price)) > 0;
     cta = `<div class="l-rsvp-actions">
-      ${passStatusHTML(myPass)}
+      ${passStatusHTML(myPass, ev)}
+      ${needsPay ? `<button class="l-primary l-block" data-action="pay" data-id="${esc(ev.id)}">Pay ${esc(pay.formatPaise(myPass.amountPaise || pay.parsePricePaise(ev.price)))}${IX.arrow}</button>` : ""}
       ${state.user?.isAnonymous ? `<p class="l-guest-note">You're RSVP'd as a guest on this device. Save your pass link — there's no account to recover it from later.</p>` : ""}
-      <button class="l-primary l-block" data-action="edit-rsvp" data-id="${esc(ev.id)}">${IX.edit} Edit my details</button>
+      <button class="${needsPay ? "l-outline" : "l-primary"} l-block" data-action="edit-rsvp" data-id="${esc(ev.id)}">${IX.edit} Edit my details</button>
       <button class="l-outline l-block" data-action="cancel-rsvp" data-id="${esc(ev.id)}">Cancel RSVP</button>
     </div>`;
   } else {
-    cta = `<button class="l-primary l-block" data-action="rsvp" data-id="${esc(ev.id)}" ${full ? "disabled" : ""}>
-      ${full ? "Event is full" : ev.approval ? "Request to attend" : "RSVP"}${full ? "" : IX.arrow}</button>`;
+    cta = `<button class="l-primary l-block" data-action="rsvp" data-id="${esc(ev.id)}">
+      ${full ? "Join the waitlist" : ev.approval ? "Request to attend" : "RSVP"}${IX.arrow}</button>
+      ${full ? `<p class="l-guest-note">This event is full — joining puts you on the waitlist, and your pass appears here if a spot opens.</p>` : ""}`;
   }
   return `<div class="l-crumb"><a href="#/">Events</a>${IX.caret}<span>${esc(ev.title)}</span></div>
   <div class="l-detail">
@@ -764,7 +814,7 @@ function detailHTML(ev, rsvps, mine, owner, full, myPass) {
         ${owner ? gatePanelHTML(ev) : ""}
         ${owner ? `<div class="l-owner-note">You're hosting this event</div>` : ""}
         ${cta}
-        ${ev.capacity ? `<p class="l-cap-note">${rsvps.length} of ${ev.capacity} spots taken</p>` : ""}
+        ${ev.capacity ? `<p class="l-cap-note">${rsvps.length} of ${ev.capacity} spots taken${full ? " · Full — waitlist open" : ""}</p>` : ""}
       </aside>
     </div>
   </div>
@@ -779,6 +829,16 @@ async function renderEvent(id, seq) {
     setView(`<div class="l-notice"><h1>Event not found</h1><p>This event may have been removed.</p>
       <a href="#/">Back to events</a></div>`);
     return;
+  }
+  // The host opening their own event page is a waitlist promotion
+  // moment: spots freed since the last visit (a member cancelled from
+  // their own page — which cannot promote anyone itself) are filled
+  // from the queue BEFORE anything renders, so the member list below
+  // is already current. Quiet on failure — the organiser dashboard
+  // surfaces promotion problems properly.
+  if (state.user && ev.ownerId === state.user.uid && !DEMO) {
+    try { await fb.promoteWaitlist(id); } catch (e) { console.warn("promoteWaitlist failed", e); }
+    if (renderSeq !== seq) return;
   }
   const rsvps = await rsvpsFor(id, ev);
   if (renderSeq !== seq) return;
@@ -813,6 +873,15 @@ async function renderEvent(id, seq) {
   state.members = rsvps;
   setView(detailHTML(ev, rsvps, mine, owner, full, myPass));
   if (owner) renderMembers();
+  // Paid event + payments configured: warm-load Razorpay's checkout.js
+  // so the modal opens instantly when the member pays. This is the only
+  // place the script is fetched speculatively — free events, and paid
+  // events with no key ID configured, never load it.
+  if (!DEMO && !owner && pay.parsePricePaise(ev.price) > 0) {
+    pay.resolveRazorpayKeyId(() => fb.getPublicConfig())
+      .then((k) => { if (k) return pay.loadCheckout(); })
+      .catch(() => {});
+  }
 }
 
 // Re-render just the detail view after a write so the fresh RSVP list (and any
@@ -941,6 +1010,7 @@ function openRsvpForm(ev, existing = null, ownerMode = false, opts = {}) {
 
     btn.disabled = true;
     btn.textContent = "Saving…";
+    let rsvpResult = null;   // set by the brand-new-RSVP branches (drives the paid checkout step)
     try {
       if (DEMO) {
         const uid = existing?.uid || (ownerMode ? "demo-member" : state.user?.uid) || "demo-you";
@@ -984,7 +1054,7 @@ function openRsvpForm(ev, existing = null, ownerMode = false, opts = {}) {
             throw e;
           }
           state.user = gUser;
-          await fb.rsvpEvent(ev.id, gUser, answers);
+          rsvpResult = await fb.rsvpEvent(ev.id, gUser, answers);
           delete state.rsvps[ev.id];
         } finally {
           state.guestFlow = false;
@@ -995,21 +1065,42 @@ function openRsvpForm(ev, existing = null, ownerMode = false, opts = {}) {
           btn.disabled = false; btn.innerHTML = btnHTML;
           return;
         }
-        await fb.rsvpEvent(ev.id, u, answers);
+        rsvpResult = await fb.rsvpEvent(ev.id, u, answers);
         delete state.rsvps[ev.id];
       }
       closeRsvpForm();
       let message = ownerMode ? "Member updated" : existing ? "Details updated" : "You're going!";
+      // Paid event + brand-new RSVP + order still unpaid → straight
+      // into checkout. The RSVP and its unpaid order are already
+      // recorded, so a dismissed checkout loses nothing: the Pay button
+      // on the event page resumes from exactly here.
+      let payOutcome = null;
+      if (!ownerMode && !existing && !DEMO && rsvpResult?.payStatus === "unpaid") {
+        payOutcome = await runPaidCheckout(ev, answers, rsvpResult.amountPaise || pay.parsePricePaise(ev.price));
+      }
       if (!ownerMode && !DEMO) {
         try {
           const pass = await fb.requestPass(ev.id);
           state.myPass = pass;
           if (pass.status === "pending") message = existing ? "Request resubmitted — awaiting approval" : "Request sent — awaiting approval";
+          else if (pass.status === "waitlisted") message = "This event is full — you're on the waitlist";
           else if (pass.status === "rejected") message = "Request wasn't approved";
           else if (guest) message = "You're going! Save your pass link — it's the only copy.";
         } catch {}
       }
-      toast(message, "check");
+      if (payOutcome?.state === "paid") {
+        message = payOutcome.status === "pending"
+          ? "Payment recorded — awaiting host approval"
+          : payOutcome.status === "waitlisted"
+            ? "Payment recorded — this event is full, you're on the waitlist"
+            : guest ? "You're going! Save your pass link — it's the only copy." : "You're going!";
+      } else if (payOutcome) {
+        // runPaidCheckout already told the member exactly what happened
+        // (not switched on / dismissed) — don't paper over it with the
+        // generic success toast.
+        message = null;
+      }
+      if (message) toast(message, "check");
       await refreshEventView(ev.id);
       // A guest session began during this submit: re-route once so the nav
       // catches up (it still offers "Sign in" otherwise). The detail view
@@ -1093,23 +1184,33 @@ function filteredMembers() {
     fields.some((f) => memberValue(r, f).toLowerCase().includes(q)) ||
     joinedLabel(r).toLowerCase().includes(q));
 }
-function memberRowsHTML(rows, fields) {
+// Live waitlist positions for the member directory, computed from the
+// full (unfiltered) member list in RSVP creation order — the same
+// ordering firebase.js promotes in.
+function waitlistPositions() {
+  const queued = (state.members || [])
+    .filter((r) => (r.status || "") === "waitlisted")
+    .sort((a, b) => String(a.created_at || a.at || "").localeCompare(String(b.created_at || b.at || "")) || a.uid.localeCompare(b.uid));
+  return new Map(queued.map((r, i) => [r.uid, i + 1]));
+}
+function memberRowsHTML(rows, fields, positions = new Map()) {
   if (!rows.length) {
     return `<tr><td class="l-table-empty" colspan="${fields.length + 3}">No members to show.</td></tr>`;
   }
   return rows.map((r) => {
     const status = r.status || "approved";
     const pending = status === "pending";
+    const waitlisted = status === "waitlisted";
     const approved = status === "approved";
     return `<tr>
     ${fields.map((f) => `<td>${esc(memberValue(r, f)) || "—"}</td>`).join("")}
-    <td class="l-member-status">${statusPill(r.status)}</td>
+    <td class="l-member-status">${statusPill(r.status)}${waitlisted && positions.get(r.uid) ? `<span class="l-wait-pos">#${positions.get(r.uid)} in queue</span>` : ""}${r.pay_status === "client_paid_unverified" ? `<span class="l-status-pill is-pay-unverified">Paid (unverified)</span>` : r.pay_status === "verified" ? `<span class="l-status-pill is-pay-verified">Paid</span>` : r.pay_status === "unpaid" ? `<span class="l-status-pill is-pay-unpaid">Unpaid</span>` : ""}</td>
     <td class="l-member-joined">${esc(joinedLabel(r))}</td>
     <td class="l-member-actions">
       ${approved ? `<button type="button" class="l-mini-btn is-pass" data-action="member-pass" data-uid="${esc(r.uid)}"
         title="View member pass">${IX.pass}<span>Pass</span></button>` : ""}
-      ${pending ? `<button type="button" class="l-mini-btn is-approve" data-action="member-approve" data-uid="${esc(r.uid)}"
-        title="Approve member">${I.check}<span>Approve</span></button>
+      ${pending || waitlisted ? `<button type="button" class="l-mini-btn is-approve" data-action="member-approve" data-uid="${esc(r.uid)}"
+        title="${waitlisted ? "Approve — issues a pass if a spot is free, otherwise they stay queued" : "Approve member"}">${I.check}<span>Approve</span></button>
       <button type="button" class="l-mini-btn is-reject" data-action="member-reject" data-uid="${esc(r.uid)}"
         title="Reject member">${IX.close}<span>Reject</span></button>` : ""}
       <button type="button" class="l-mini-btn" data-action="member-edit" data-uid="${esc(r.uid)}"
@@ -1144,7 +1245,7 @@ function renderMembers() {
       <table class="l-member-table">
         <thead><tr>${fields.map((f) => `<th scope="col">${esc(f.label || f.key)}</th>`).join("")}
           <th scope="col">Status</th><th scope="col">Joined</th><th scope="col">Actions</th></tr></thead>
-        <tbody id="l-member-rows">${memberRowsHTML(rows, fields)}</tbody>
+        <tbody id="l-member-rows">${memberRowsHTML(rows, fields, waitlistPositions())}</tbody>
       </table>
     </div>
     <p class="l-member-empty" id="l-member-empty" ${rows.length ? "hidden" : ""}>${
@@ -1157,7 +1258,7 @@ function refreshMembersTable() {
   const body = $("#l-member-rows", mountNode);
   if (!body) return;
   const rows = filteredMembers();
-  body.innerHTML = memberRowsHTML(rows, enabledFormFields(state.currentEvent));
+  body.innerHTML = memberRowsHTML(rows, enabledFormFields(state.currentEvent), waitlistPositions());
   const empty = $("#l-member-empty", mountNode);
   if (empty) {
     empty.hidden = rows.length > 0;
@@ -1197,17 +1298,22 @@ async function setMemberStatus(approve, uid) {
   const ev = state.currentEvent;
   if (!ev || !uid) return;
   try {
+    let outcome = null;
     if (DEMO) {
       const member = (state.rsvps[ev.id] || []).find((r) => r.uid === uid);
       if (member) member.status = approve ? "approved" : "rejected";
     } else if (approve) {
-      await fb.approveMember(ev.id, uid);
+      outcome = await fb.approveMember(ev.id, uid);
       state.rsvps[ev.id] = await fb.listRsvps(ev.id);
     } else {
       await fb.rejectMember(ev.id, uid);
       state.rsvps[ev.id] = await fb.listRsvps(ev.id);
     }
-    toast(approve ? "Member approved" : "Member rejected", "check");
+    // Approving into a full event doesn't fail — it queues the member.
+    // Say so plainly instead of claiming an approval that issued nothing.
+    toast(approve
+      ? (outcome?.status === "waitlisted" ? "Event is full — they're on the waitlist" : "Member approved")
+      : "Member rejected", "check");
     // Re-render the detail so the member list and the RSVP counts stay in sync.
     await refreshEventView(ev.id);
   } catch (e) { toast(e?.message || DB_MSG, "warnDot"); }
@@ -1229,6 +1335,69 @@ function copyGateLink() {
   copyText(gateUrl(code));
   toast("Gate link copied");
 }
+// ── Paid passes: checkout step ─────────────────────────────────────────
+// Runs AFTER rsvpEvent has recorded the RSVP + unpaid order (or when a
+// returning unpaid member taps Pay). Outcomes:
+//   "unconfigured" — no Razorpay key ID anywhere: NO pass is issued and
+//                    the member is told payments aren't switched on.
+//                    A paid event must never silently become free.
+//   "dismissed"    — modal closed / payment failed: order stays
+//                    unpaid, no pass; the Pay button retries.
+//   "paid"         — browser reported success: the payment is recorded
+//                    as client_paid_unverified and the pass flow
+//                    completes (completePaidRsvp). NOT proof of payment
+//                    — see docs/paid-passes.md.
+async function runPaidCheckout(ev, answers, amountPaise) {
+  const keyId = await pay.resolveRazorpayKeyId(() => fb.getPublicConfig());
+  if (!keyId) {
+    toast("Payments aren't switched on for this event yet — please contact the organiser.", "x");
+    return { state: "unconfigured" };
+  }
+  let res = null;
+  try {
+    res = await pay.openCheckout({
+      keyId, amountPaise, title: ev.title,
+      name: answers.name, email: answers.email, phone: answers.phone,
+    });
+  } catch (e) { console.warn("Razorpay checkout failed to open", e); }
+  if (!res?.paymentId) {
+    toast("Payment not completed — your RSVP is saved. Use the Pay button on this page whenever you're ready.", "warnDot");
+    return { state: "dismissed" };
+  }
+  try {
+    const done = await fb.completePaidRsvp(ev.id, res.paymentId, amountPaise, undefined, res);
+    return { state: "paid", status: done.status };
+  } catch (e) {
+    console.error(e);
+    toast(`You paid, but we couldn't finish issuing your pass — contact the organiser with payment id ${res.paymentId}.`, "x");
+    return { state: "error" };
+  }
+}
+
+// The Pay button on the event page: resume an unpaid order.
+async function doPay(id) {
+  let ev = state.currentEvent?.id === id ? state.currentEvent : null;
+  if (!ev && !DEMO) { try { ev = await fb.getV2Event(id); } catch {} }
+  if (!ev) return;
+  const amountPaise = pay.parsePricePaise(ev.price);
+  if (amountPaise <= 0) return;
+  let mine = state.myPass;
+  if (!mine && !DEMO) { try { mine = await fb.requestPass(id); } catch {} }
+  const outcome = await runPaidCheckout(ev, {
+    name: mine?.name || state.user?.displayName || "",
+    email: mine?.email || state.user?.email || "",
+    phone: mine?.phone || "",
+  }, amountPaise);
+  if (outcome.state === "paid") {
+    toast(outcome.status === "pending"
+      ? "Payment recorded — awaiting host approval"
+      : outcome.status === "waitlisted"
+        ? "Payment recorded — this event is full, you're on the waitlist"
+        : "You're going!", "check");
+  }
+  await refreshEventView(id);
+}
+
 async function doRsvp(id) { await openRsvpFor(id); }
 // The event page's "Sign in to RSVP" button: sign in AND continue into the
 // RSVP form, so the click visibly completes the job its label promises.
@@ -1338,6 +1507,7 @@ function onClick(e) {
   if (a === "share") { doShare(); return; }
   if (a === "copy-gate") { copyGateLink(); return; }
   if (a === "rsvp" || a === "edit-rsvp") { doRsvp(el.dataset.id); return; }
+  if (a === "pay") { doPay(el.dataset.id); return; }
   if (a === "cancel-rsvp") { doCancelRsvp(el.dataset.id); return; }
   if (a === "member-approve") { setMemberStatus(true, el.dataset.uid); return; }
   if (a === "member-reject") { setMemberStatus(false, el.dataset.uid); return; }

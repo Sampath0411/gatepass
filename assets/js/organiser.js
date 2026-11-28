@@ -7,6 +7,7 @@ import * as fb from "./firebase.js";
 import * as sheets from "./sheets.js";
 import { parseTable, analyse, toPasses, toCsv, isEmail, isPhone, normalizePhone, sheetToCsvUrl, fetchSheetCsv } from "./csv.js";
 import { passImageBlob, shareOrDownload, copyImageToClipboard, gmailCompose } from "./pass-image.js";
+import { parsePricePaise, formatPaise } from "./payments.js";
 
 const view = document.getElementById("view");
 const roleEl = document.getElementById("role");
@@ -83,12 +84,13 @@ function route() {
   roleEl.innerHTML = `Organiser <button class="icon-btn" type="button" id="signout" title="Sign out (${esc(session.email || "")})" aria-label="Sign out" style="width:36px;height:36px;margin-left:4px">${I.out}</button>`;
   roleEl.querySelector("#signout").addEventListener("click", async () => { await fb.signOutUser(); location.hash = ""; });
   // Firestore auto-IDs are 20-character alphanumeric strings, not UUIDs.
-  const m = h.match(/^#\/e\/([A-Za-z0-9_-]+)(\/edit)?$/);
+  const m = h.match(/^#\/e\/([A-Za-z0-9_-]+)(\/edit|\/report)?$/);
   const fm = h.match(/^#\/fest\/([A-Za-z0-9_-]+)$/);
-  if (h === "#/new") return v2EventForm();
+  const nm = h.match(/^#\/new(?:\?from=([A-Za-z0-9_-]+))?$/);
+  if (nm) return v2EventForm(nm[1] || null);
   if (h === "#/fests") return festListView();
   if (fm) return festView(fm[1]);
-  if (m) return m[2] ? eventForm(m[1]) : eventView(m[1]);
+  if (m) return m[2] === "/edit" ? eventForm(m[1]) : m[2] === "/report" ? reportView(m[1]) : eventView(m[1]);
   return listView();
 }
 
@@ -276,33 +278,64 @@ async function eventForm(id = null) {
 // second, separate copy. Editing a v2 event happens in the full editor on
 // the events site (linked from the event's dashboard page); this quick form
 // covers the fields a sheet-driven event needs.
-async function v2EventForm() {
-  const when = (() => { const d = nextSaturday(); d.setHours(18, 0, 0, 0); return d; })();
-  document.title = "New event · GatePass";
+// The create form doubles as the Duplicate flow: with ?from=<id> it
+// prefills from that v2 event (name, venue, art, visibility, capacity)
+// and carries the fields the quick form doesn't show (description, price,
+// approval, timezone, form fields) over at submit time. Only details and
+// settings are copied — createV2Event always mints a fresh gate code and
+// the new event starts with zero passes, RSVPs and claims. The default
+// date is the source's weekday and time, one week on, rolled forward by
+// whole weeks until it is in the future; the organiser confirms or
+// changes it in the date field like any other create.
+async function v2EventForm(sourceId = null) {
+  let src = null;
+  if (sourceId) {
+    view.innerHTML = `<div class="skeleton" style="height:220px"></div>`;
+    try {
+      const v = await withTimeout(fb.getV2Event(sourceId));
+      if (v && v.ownerId === session.uid) src = v;
+    } catch {}
+    if (!src) toast("Couldn't load that event to duplicate — starting blank", "x");
+  }
+  const when = (() => {
+    if (src?.startsAt) {
+      const d = new Date(src.startsAt);
+      if (!isNaN(d)) {
+        d.setDate(d.getDate() + 7);
+        while (d.getTime() <= Date.now()) d.setDate(d.getDate() + 7);
+        return d;
+      }
+    }
+    const d = nextSaturday(); d.setHours(18, 0, 0, 0); return d;
+  })();
+  const duration = src?.startsAt && src?.endsAt
+    ? new Date(src.endsAt).getTime() - new Date(src.startsAt).getTime() : 0;
+  document.title = `${src ? "Duplicate" : "New"} event · GatePass`;
   view.innerHTML = `
     <div class="narrow">
     <a class="backlink" href="#">${I.back}Your events</a>
     <form id="evForm" class="stack" novalidate>
-      <h1 class="head">New event</h1>
-      <label class="field"><span>Event name</span><input class="input" name="name" maxlength="80" required placeholder="e.g. Freshers’ Night 2026"></label>
+      <h1 class="head">${src ? "Duplicate event" : "New event"}</h1>
+      ${src ? `<p class="fine" style="margin:0">Copying <b>${escT(src.title)}</b> — details and settings only. Passes, RSVPs and check-ins are not copied, and the copy gets its own gate code. Check the date, then create.</p>` : ""}
+      <label class="field"><span>Event name</span><input class="input" name="name" maxlength="80" required placeholder="e.g. Freshers’ Night 2026" value="${esc(src?.title || "")}"></label>
       <div class="two">
         <label class="field"><span>Date</span><input class="input" type="date" name="date" required value="${ymd(when)}"></label>
         <label class="field"><span>Time</span><input class="input" type="time" name="time" required value="${hm(when)}"></label>
       </div>
-      <label class="field"><span>Venue</span><input class="input" name="venue" maxlength="120" placeholder="e.g. Main Auditorium"></label>
+      <label class="field"><span>Venue</span><input class="input" name="venue" maxlength="120" placeholder="e.g. Main Auditorium" value="${esc(src?.location || "")}"></label>
       <fieldset class="field" style="border:0;margin:0;padding:0"><span>Poster art</span>
         <div class="art-pick">
-          ${ART.map((a, i) => `<label><input type="radio" name="art" value="${i}" ${i === 0 ? "checked" : ""} aria-label="${a.name}"><img src="${artUrl(i, true)}" alt="" loading="lazy" width="240" height="240"><span class="art-name">${a.name}</span></label>`).join("")}
+          ${ART.map((a, i) => `<label><input type="radio" name="art" value="${i}" ${i === (src ? artIndexOf(src.cover) : 0) ? "checked" : ""} aria-label="${a.name}"><img src="${artUrl(i, true)}" alt="" loading="lazy" width="240" height="240"><span class="art-name">${a.name}</span></label>`).join("")}
         </div>
       </fieldset>
       <div class="two">
         <label class="field"><span>Visibility</span>
           <select class="select" name="visibility">
-            <option value="public" selected>Public — listed on the homepage</option>
-            <option value="private">Private — link only</option>
+            <option value="public" ${src?.visibility !== "private" ? "selected" : ""}>Public — listed on the homepage</option>
+            <option value="private" ${src?.visibility === "private" ? "selected" : ""}>Private — link only</option>
           </select>
         </label>
-        <label class="field"><span>Capacity (0 = no limit)</span><input class="input" type="number" name="capacity" min="0" max="100000" value="0"></label>
+        <label class="field"><span>Capacity (0 = no limit)</span><input class="input" type="number" name="capacity" min="0" max="100000" value="${src?.capacity || 0}"></label>
       </div>
       <p class="err" id="fErr" role="alert" hidden></p>
       <button class="btn-primary compact" type="submit" id="saveBtn"><span class="label">Create event</span><span class="arrow">${I.arrow}</span></button>
@@ -316,7 +349,7 @@ async function v2EventForm() {
     const starts = new Date(`${f.get("date")}T${f.get("time") || "18:00"}`);
     if (!name) { err.textContent = "Give the event a name."; err.hidden = false; return form.name.focus(); }
     if (isNaN(starts)) { err.textContent = "Pick a date and time."; err.hidden = false; return; }
-    const ends = new Date(starts.getTime() + 3 * 3600e3);
+    const ends = new Date(starts.getTime() + (duration > 0 ? duration : 3 * 3600e3));
     const art = Number(f.get("art") || 0);
     const restoreBtn = setBtnBusy(view.querySelector("#saveBtn"), "Creating…");
     let id;
@@ -324,9 +357,11 @@ async function v2EventForm() {
       id = await withTimeout(fb.createV2Event({
         title: name, cover: ART[art]?.key || "crowd",
         startsAt: starts.toISOString(), endsAt: ends.toISOString(),
-        location: String(f.get("venue")).trim(), description: "", price: "Free",
-        approval: false, capacity: Number(f.get("capacity")) || 0,
+        location: String(f.get("venue")).trim(),
+        description: src?.description || "", price: src?.price || "Free",
+        approval: !!src?.approval, capacity: Number(f.get("capacity")) || 0,
         visibility: String(f.get("visibility")) === "private" ? "private" : "public",
+        timezone: src?.timezone || "", formFields: src?.formFields,
       }));
     } catch (e2) {
       restoreBtn();
@@ -828,11 +863,24 @@ async function eventView(id) {
 // sheet-issued ones showed three different totals on one screen and hid
 // the RSVP passes from the organiser entirely (live test, 27 Nov 2026).
 async function loadUnifiedPasses(eventId) {
-  const [own, rsvp] = await Promise.all([
-    withTimeout(fb.getOrganiserPasses(eventId)),
-    withTimeout(fb.getRsvpPasses(eventId)),
-  ]);
-  return [...own.map((p) => ({ ...p, source: "organiser" })), ...rsvp];
+  const own = await withTimeout(fb.getOrganiserPasses(eventId));
+  // The RSVP half reads a different collection under different rules
+  // grants than the organiser half. If it is denied (e.g. the published
+  // rules lag the repo's), the dashboard must degrade LOUDLY — organiser
+  // passes on screen plus a visible incompleteness hint — never silently
+  // organiser-only (which reads as "the RSVP passes vanished") and never
+  // a dead dashboard. The error rides on the returned array so every
+  // caller (initial load, reload after generating) can surface it.
+  let rsvp = [], rsvpError = "";
+  try {
+    rsvp = await withTimeout(fb.getRsvpPasses(eventId));
+  } catch (e) {
+    console.error("[GatePass] RSVP pass load failed:", e);
+    rsvpError = "RSVP and guest passes couldn't be loaded — the list below is incomplete. If this keeps showing, the Firestore rules on the Firebase project are out of date — re-publish firestore.rules from the repo.";
+  }
+  const merged = [...own.map((p) => ({ ...p, source: "organiser" })), ...rsvp];
+  merged.rsvpError = rsvpError;
+  return merged;
 }
 
 // Load a v2 event into the same dashboard state shape the legacy flow uses.
@@ -841,10 +889,57 @@ async function loadV2State(v2) {
     id: v2.id, name: v2.title, club: "", venue: v2.location || "",
     art: artIndexOf(v2.cover), starts_at: v2.startsAt, gate_code: v2.gate_code,
   };
+  // A dashboard open is a waitlist promotion moment: spots may have
+  // freed since the last visit (a member cancelled from their own page
+  // — which cannot promote anyone itself — or capacity was raised from
+  // the edit form). The queue drains BEFORE the pass list is built, so
+  // promoted members appear below as ordinary passes and the gate-total
+  // reconcile counts them. Failures surface like the other load
+  // problems instead of failing the whole dashboard.
+  let promotedCount = 0, waitlistError = "";
+  try {
+    const res = await withTimeout(fb.promoteWaitlist(v2.id));
+    promotedCount = res?.promoted?.length || 0;
+  } catch (e) {
+    console.error("[GatePass] waitlist promotion failed:", e);
+    waitlistError = "The waitlist couldn't be checked — queued guests may not have been promoted. If this keeps showing, the Firestore rules on the Firebase project are out of date — re-publish firestore.rules from the repo.";
+  }
   const passes = await loadUnifiedPasses(v2.id);
+  let waitlist = [];
+  try { waitlist = await withTimeout(fb.listWaitlist(v2.id)); }
+  catch (e) { console.error("[GatePass] waitlist load failed:", e); }
   const gate = ev.gate_code ? await withTimeout(fb.joinGate(ev.gate_code)) : null;
+  // Reconcile the gate doc's total with the unified list: the list IS
+  // the issued-pass count, and the gate scanner reads the doc — a doc
+  // drifted by an older build (live test event: gate said 4, five
+  // passes existed) would otherwise disagree with this dashboard
+  // forever. Only heal from a COMPLETE list: with the RSVP half missing
+  // the count is a lower bound, and writing it would clobber the truth.
+  let totalError = "";
+  if (gate && !passes.rsvpError && gate.counts.total !== passes.length) {
+    try {
+      await withTimeout(fb.repairGateTotal(ev.gate_code, passes.length));
+      gate.counts.total = passes.length;
+    } catch (e) {
+      console.error("[GatePass] gate total reconcile failed:", e);
+      totalError = "The gate scanner's total couldn't be reconciled with the pass list — the scanner may show a different total until this is fixed. If this keeps showing, the Firestore rules on the Firebase project are out of date — re-publish firestore.rules from the repo.";
+    }
+  }
   let claims = [];
   try { claims = await fb.getClaims(ev.gate_code); } catch {}
+  // Paid events: the Payments section reads the order fields off the
+  // RSVP docs (the owner already reads them all for the pass list).
+  // Free events skip the read entirely — no section, no extra fetch.
+  let payments = null;
+  const amountPaise = parsePricePaise(v2.price);
+  if (amountPaise > 0) {
+    let orders = [];
+    try {
+      const all = await withTimeout(fb.listRsvps(v2.id));
+      orders = all.filter((r) => r.pay_status || r.amount_paise);
+    } catch (e) { console.error("[GatePass] payments load failed:", e); }
+    payments = { amountPaise, orders };
+  }
   const publicEvent = {
     name: v2.title, title: v2.title, cover: v2.cover, art: ev.art,
     starts_at: v2.startsAt, ends_at: v2.endsAt, location: v2.location || "",
@@ -852,6 +947,13 @@ async function loadV2State(v2) {
   };
   return {
     kind: "v2", ev, passes, gate, claims, unified: true,
+    rsvpError: passes.rsvpError || "", totalError,
+    capacity: v2.capacity || 0, waitlist, promotedCount, waitlistError, payments,
+    reloadWaitlist: () => fb.listWaitlist(v2.id),
+    // Removing a queued member is a rejection without a pass to revoke:
+    // rejectMember flips the status (and re-drains the queue, which
+    // re-stamps the remaining positions).
+    removeFromWaitlist: (uid) => fb.rejectMember(v2.id, uid),
     // Gate-code rotation is not offered for v2 events: the current rules
     // only let a new gate doc be created in the same batch as its event,
     // and existing claims cannot be re-created under a new code — rotating
@@ -864,6 +966,12 @@ async function loadV2State(v2) {
     markWaSent: (p) => p.source === "organiser"
       ? fb.markOrganiserPassWaSent(v2.id, p.id)
       : fb.markRsvpWaSent(v2.id, p.id),
+    // The reminder marker dispatches exactly like the delivery marker:
+    // index-doc array entry for sheet-issued passes, RSVP doc field for
+    // RSVP ones.
+    markReminded: (p) => p.source === "organiser"
+      ? fb.markOrganiserPassReminded(v2.id, p.id)
+      : fb.markRsvpReminded(v2.id, p.id),
     removeEvent: async () => {
       const current = await fb.getOrganiserPasses(v2.id);
       await fb.deleteOrganiserPasses(current);
@@ -872,7 +980,7 @@ async function loadV2State(v2) {
   };
 }
 
-function eventDashboard({ kind, ev, passes, gate, claims, canRotate, editHref, genBatch, reloadPasses, removeEvent, markWaSent, unified = false }) {
+function eventDashboard({ kind, ev, passes, gate, claims, canRotate, editHref, genBatch, reloadPasses, removeEvent, markWaSent, markReminded, unified = false, rsvpError = "", totalError = "", capacity = 0, waitlist = [], reloadWaitlist = null, removeFromWaitlist = null, promotedCount = 0, waitlistError = "", payments = null }) {
   const id = ev.id;
   // Creation order ONLY: generation stamps each pass 1ms apart precisely so
   // this sort reproduces the sheet's row order. A name tiebreak here used to
@@ -880,7 +988,7 @@ function eventDashboard({ kind, ev, passes, gate, claims, canRotate, editHref, g
   passes.sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
   // Only bounced comes from the staff-writable gate doc; the checked count and
   // per-pass stamps come from immutable claim docs.
-  const state = { kind, ev, passes, first: new Map(), bounced: gate?.counts.bounced ?? 0, checked: 0, upload: null, filter: "", shown: 120, waSent: new Set(passes.filter((p) => p.wa_sent_at).map((p) => p.id)), sheet: null, stamped: new Set(), canRotate, editHref, genBatch, reloadPasses, removeEvent, markWaSent, unified };
+  const state = { kind, ev, passes, claims, first: new Map(), bounced: gate?.counts.bounced ?? 0, checked: 0, upload: null, filter: "", shown: 120, waSent: new Set(passes.filter((p) => p.wa_sent_at).map((p) => p.id)), reminded: new Set(passes.filter((p) => p.reminded_at).map((p) => p.id)), sheet: null, stamped: new Set(), canRotate, editHref, genBatch, reloadPasses, removeEvent, markWaSent, markReminded, unified, rsvpError, totalError, capacity, waitlist, reloadWaitlist, removeFromWaitlist, waitlistError, payments };
   // Unified (v2) dashboards list every pass there is — sheet-issued and
   // RSVP-issued — so the list length IS the total, the same number the
   // gate doc counts and the scanner shows. Legacy dashboards keep reading
@@ -910,8 +1018,12 @@ function eventDashboard({ kind, ev, passes, gate, claims, canRotate, editHref, g
         <div id="passTools" class="stack"></div>
         <ul class="passlist" id="plist"></ul>
         <div class="more-row" id="more"></div>
+        <div id="waitlistSlot"></div>
+        <div id="paySlot"></div>
         <div class="danger-zone">
           <a class="btn small" href="${esc(state.editHref)}">Edit details</a>
+          ${state.unified ? `<a class="btn small" href="#/e/${encodeURIComponent(id)}/report">Report</a>` : ""}
+          ${state.unified ? `<a class="btn small" href="#/new?from=${encodeURIComponent(id)}">${I.copy}Duplicate</a>` : ""}
           <button class="btn small danger" type="button" id="del">${I.trash}Delete event</button>
         </div>
       </div>
@@ -923,6 +1035,9 @@ function eventDashboard({ kind, ev, passes, gate, claims, canRotate, editHref, g
   renderGate(state);
   renderPassTools(state);
   renderList(state);
+  renderWaitlist(state);
+  renderPayments(state);
+  if (promotedCount) toast(`${plural(promotedCount, "waitlisted guest")} promoted from the waitlist`, "check");
 
   const del = view.querySelector("#del");
   let armed = 0;
@@ -1086,6 +1201,13 @@ async function generate(state) {
   const list = up.res.passes;
   const slot = view.querySelector("#regSlot");
   const total = list.length;
+  // Capacity is a soft cap for the organiser's OWN list: warn plainly if
+  // this batch runs past it, but never block — their registrations are
+  // their call. (RSVP self-service is the hard gate, in rsvpEvent: the
+  // issued count this batch raises is exactly what waitlists people.)
+  if (state.unified && state.capacity > 0 && state.total + total > state.capacity) {
+    toast(`Over capacity: ${state.total} passes + ${total} more passes the ${state.capacity} limit — generating anyway, it's your list`, "x");
+  }
   slot.innerHTML = `
     <div class="row" style="min-height:60px"><span style="width:30px;height:36px;display:block">${I.doc}</span><span class="grow">${esc(up.fileName)} · ${plural(total, "pass", "passes")}</span></div>
     <div class="btn-primary" aria-live="polite" style="cursor:progress">
@@ -1119,6 +1241,10 @@ async function generate(state) {
     state.passes.sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
     // Newly generated passes start unmarked; keep any markers already stored.
     state.waSent = new Set(state.passes.filter((p) => p.wa_sent_at).map((p) => p.id));
+    state.reminded = new Set(state.passes.filter((p) => p.reminded_at).map((p) => p.id));
+    // A reload can newly fail (or recover) the RSVP half — keep the
+    // incompleteness hint honest either way.
+    if (state.unified) state.rsvpError = state.passes.rsvpError || "";
     const gate = await withTimeout(fb.joinGate(state.ev.gate_code));
     // Unified dashboards recount from the list itself (it now includes any
     // passes just generated); legacy ones keep the gate doc's total.
@@ -1129,6 +1255,55 @@ async function generate(state) {
 }
 
 // ── checked-in counter ──
+const fmtHour = (h) => `${h % 12 || 12} ${h < 12 ? "AM" : "PM"}`;
+
+// Per-gate breakdown + busiest hour, derived entirely from the claim docs
+// the dashboard already loads (first scans plus their repeats) — no new
+// counters are stored anywhere. A repeat counts against the gate where
+// the repeat scan happened, which is the gate that turned the person
+// away. The structured breakdown is shared by the dashboard's stat card
+// (gateStatsHtml) and the post-event report.
+function gateBreakdown(claims) {
+  const gates = new Map(), hours = new Map();
+  const bump = (name, key) => {
+    const g = gates.get(name) || { in: 0, bounced: 0 };
+    g[key]++;
+    gates.set(name, g);
+  };
+  for (const c of claims || []) {
+    bump(c.gate || "Gate", "in");
+    if (c.scanned_at) {
+      const h = new Date(c.scanned_at).getHours();
+      if (!isNaN(h)) hours.set(h, (hours.get(h) || 0) + 1);
+    }
+    for (const r of c.repeats || []) bump(r.gate || c.gate || "Gate", "bounced");
+  }
+  let busiest = null;
+  if (hours.size) {
+    const [h, n] = [...hours.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0];
+    busiest = { hour: h, count: n };
+  }
+  return {
+    gates: [...gates.entries()]
+      .sort((a, b) => b[1].in - a[1].in || a[0].localeCompare(b[0]))
+      .map(([name, g]) => ({ name, in: g.in, bounced: g.bounced })),
+    busiest,
+  };
+}
+
+// Renders nothing until the first scan exists.
+function gateStatsHtml(claims) {
+  if (!claims?.length) return "";
+  const { gates, busiest } = gateBreakdown(claims);
+  const rows = gates
+    .map((g) => `<p class="stat-note"><b>${esc(g.name)}</b> — ${g.in} in${g.bounced ? ` · ${g.bounced} bounced` : ""}</p>`)
+    .join("");
+  const busy = busiest
+    ? `<p class="stat-note">Busiest hour: ${fmtHour(busiest.hour)}–${fmtHour((busiest.hour + 1) % 24)} · ${plural(busiest.count, "check-in")}</p>`
+    : "";
+  return rows + busy;
+}
+
 function renderStat(state, bump = false) {
   const total = state.total ?? state.passes.length, checked = state.checked ?? state.first.size;
   const el = view.querySelector("#stat");
@@ -1137,9 +1312,186 @@ function renderStat(state, bump = false) {
     <p class="stat-label">Checked in</p>
     <div class="stat-line"><p class="stat-num ink" id="snum">${checked} / ${total}</p><div class="bar" aria-hidden="true"><i style="--p:${total ? Math.min(1, checked / total) : 0}"></i></div></div>
     ${state.bounced ? `<p class="stat-note">${plural(state.bounced, "repeat scan")} bounced at the gate</p>` : ""}
-    ${state.stampError ? `<p class="stat-note err">${esc(state.stampError)}</p>` : ""}`;
+    ${state.unified && state.capacity ? `<p class="stat-note">Spots filled: ${total} / ${state.capacity}${state.waitlist?.length ? ` · ${plural(state.waitlist.length, "person", "people")} waiting` : ""}</p>` : ""}
+    ${gateStatsHtml(state.claims)}
+    ${state.stampError ? `<p class="stat-note err">${esc(state.stampError)}</p>` : ""}
+    ${state.waitlistError ? `<p class="stat-note err">${esc(state.waitlistError)}</p>` : ""}
+    ${state.rsvpError ? `<p class="stat-note err">${esc(state.rsvpError)}</p>` : ""}
+    ${state.totalError ? `<p class="stat-note err">${esc(state.totalError)}</p>` : ""}`;
   el.setAttribute("aria-label", `Checked in ${checked} of ${total}`);
   if (bump) { const n = el.querySelector("#snum"); n.animate([{ transform: "scale(1.08)", color: "#D4107F" }, { transform: "scale(1)" }], { duration: 520, easing: "cubic-bezier(.16,1,.3,1)" }); }
+}
+
+// ─────────────────────────────────────────────── post-event report
+// A screenshot-clean recap of a v2 event, derived entirely from the
+// data the dashboard already loads for the owner — the unified pass
+// list, the claim docs (first scans + repeats), the waitlist and the
+// RSVP docs. Nothing new is stored and no counter is kept anywhere:
+// reopen the report after more scans and it recomputes from reality.
+//
+// Definitions, kept exact so the tiles always agree with each other:
+//   issued    = passes in the unified list
+//   checkedIn = issued passes with a first-scan claim (issued − no-shows)
+//   turnout % = checkedIn / issued, rounded
+//   bounced   = repeat scans across all claims (the gate turned them away)
+//   waiting   = members currently on the waitlist
+//   promoted  = approved RSVPs carrying promoteWaitlist's explicit
+//               waitlistPosition:null stamp — the only promotion trace
+//               the data keeps (see listRsvps). A queued member who
+//               re-RSVPs into a freed spot is issued by rsvpEvent with
+//               the doc rewritten, which erases the stamp, so this
+//               count is a floor, never an invention.
+// The check-in curve and the per-gate split read ALL first claims (the
+// gate's own truth), bucketed per 30 minutes from the first claim's
+// half-hour — anchoring at doors-open rather than the event's listed
+// start, because entry flow is what the curve is about.
+const HALF_HOUR = 30 * 60 * 1000;
+
+function computeReport({ passes, claims, waitlist, rsvps }) {
+  const ordered = [...passes].sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+  const firstByPass = new Map();
+  for (const c of claims || []) if (c.is_first && !firstByPass.has(c.pass_id)) firstByPass.set(c.pass_id, c);
+  const noShows = ordered.filter((p) => !firstByPass.has(p.id));
+  const issued = ordered.length;
+  const checkedIn = issued - noShows.length;
+  const bounced = (claims || []).reduce((n, c) => n + (c.repeats?.length || 0), 0);
+  const times = (claims || [])
+    .filter((c) => c.is_first && c.scanned_at)
+    .map((c) => new Date(c.scanned_at).getTime())
+    .filter((t) => !isNaN(t))
+    .sort((a, b) => a - b);
+  let buckets = [], peak = null, firstAt = null, lastAt = null;
+  if (times.length) {
+    firstAt = times[0];
+    lastAt = times[times.length - 1];
+    const anchor = new Date(firstAt);
+    anchor.setSeconds(0, 0);
+    anchor.setMinutes(anchor.getMinutes() >= 30 ? 30 : 0);
+    const start = anchor.getTime();
+    buckets = Array.from({ length: Math.floor((lastAt - start) / HALF_HOUR) + 1 }, (_, i) => ({ start: start + i * HALF_HOUR, count: 0 }));
+    for (const t of times) buckets[Math.floor((t - start) / HALF_HOUR)].count++;
+    peak = buckets.reduce((a, b) => (b.count > a.count ? b : a), buckets[0]);
+  }
+  const { gates, busiest } = gateBreakdown(claims);
+  const promoted = rsvps
+    ? rsvps.filter((x) => x.status === "approved" && x.waitlist_stamped && x.waitlist_position === null).length
+    : null;
+  return {
+    issued, checkedIn, noShows, bounced,
+    turnout: issued ? Math.round((checkedIn / issued) * 100) : 0,
+    buckets, peak, firstAt, lastAt, gates, busiest,
+    waiting: waitlist?.length || 0, promoted,
+  };
+}
+
+// "6:30–7:00 PM" — the meridiem prints once when both ends share it.
+function fmtWindow(startMs) {
+  const fa = fmtTime(new Date(startMs)), fb = fmtTime(new Date(startMs + HALF_HOUR));
+  return `${fa.slice(-2) === fb.slice(-2) ? fa.slice(0, -3) : fa}–${fb}`;
+}
+
+function reportSummaryText(ev, r) {
+  const lines = [
+    `${typo(ev.name)} — entry report`,
+    `${fmtWhen(ev.starts_at)}${ev.venue ? ` · ${ev.venue}` : ""}`,
+    `Passes issued: ${r.issued}`,
+    `Turned up: ${r.checkedIn} (${r.turnout}%)`,
+    `Repeat scans bounced: ${r.bounced}`,
+  ];
+  if (r.peak) lines.push(`Peak entry: ${fmtWindow(r.peak.start)} · ${plural(r.peak.count, "check-in")}`);
+  for (const g of r.gates) lines.push(`${g.name}: ${g.in} in${g.bounced ? ` · ${g.bounced} bounced` : ""}`);
+  if (r.waiting) lines.push(`Still on the waitlist: ${r.waiting}`);
+  if (r.promoted) lines.push(`Promoted from the waitlist: ${r.promoted}`);
+  if (r.noShows.length) lines.push(`Didn't show: ${r.noShows.map((p) => p.name).join(", ")}`);
+  return lines.join("\n");
+}
+
+async function reportView(id) {
+  view.innerHTML = `<div class="skeleton" style="height:520px"></div>`;
+  let v2 = null;
+  try { v2 = await withTimeout(fb.getV2Event(id)); } catch {}
+  if (!v2 || v2.ownerId !== session.uid) {
+    toast("That event isn't yours or was deleted", "x");
+    location.hash = `#/e/${id}`;
+    return;
+  }
+  let loaded;
+  try { loaded = await loadV2State(v2); }
+  catch (e) { return fail(e); }
+  // The promoted count reads the RSVP docs themselves — the one read
+  // loadV2State doesn't surface. A failure hides just that one tile
+  // (loudly, like the dashboard's other load hints), never the report.
+  let rsvps = null, rsvpsError = "";
+  try { rsvps = await withTimeout(fb.listRsvps(id)); }
+  catch (e) {
+    console.error("[GatePass] report RSVP load failed:", e);
+    rsvpsError = "The RSVP list couldn't be loaded, so the promoted-from-waitlist count is hidden. If this keeps showing, the Firestore rules on the Firebase project are out of date — re-publish firestore.rules from the repo.";
+  }
+  return renderReport({ ...loaded, rsvps, rsvpsError });
+}
+
+function renderReport({ ev, passes, claims, waitlist, rsvps, rsvpsError }) {
+  const r = computeReport({ passes, claims, waitlist, rsvps });
+  const maxBucket = r.buckets.reduce((m, b) => Math.max(m, b.count), 0);
+  document.title = `${typo(ev.name)} report · GatePass`;
+  view.innerHTML = `
+    <a class="backlink" href="#/e/${ev.id}">${I.back}Back to the event</a>
+    <div class="stack narrow">
+      <div class="poster" id="repPoster">
+        <h1 class="poster-title ink">${escT(ev.name)}</h1>
+        <span class="poster-when">${esc(fmtWhen(ev.starts_at))}${ev.venue ? ` · ${esc(ev.venue)}` : ""}</span>
+      </div>
+      <div class="head-row"><h2 class="head">Entry report</h2><button class="btn small" type="button" id="repCopy">${I.copy}Copy summary</button></div>
+      <div class="stat grain">
+        <span class="dot">${I.dotCheck}</span>
+        <p class="stat-label">Turnout</p>
+        <div class="stat-line"><p class="stat-num ink">${r.turnout}%</p><div class="bar" aria-hidden="true"><i style="--p:${r.issued ? r.checkedIn / r.issued : 0}"></i></div></div>
+        <p class="stat-note">${r.checkedIn} of ${plural(r.issued, "pass", "passes")} checked in</p>
+      </div>
+      <div class="rep-stats">
+        <div class="rep-tile"><b>${r.issued}</b><span>Passes issued</span></div>
+        <div class="rep-tile"><b>${r.checkedIn}</b><span>Checked in</span></div>
+        <div class="rep-tile"><b>${r.bounced}</b><span>Repeat scans bounced</span></div>
+        <div class="rep-tile"><b>${r.waiting}</b><span>Still waiting</span></div>
+        ${r.promoted !== null ? `<div class="rep-tile"><b>${r.promoted}</b><span>Promoted from waitlist</span></div>` : ""}
+      </div>
+      ${rsvpsError ? `<p class="err" role="alert">${esc(rsvpsError)}</p>` : ""}
+      <section class="rep-card">
+        <h3 class="rep-h">Check-in curve</h3>
+        ${r.buckets.length ? `
+          <div class="rep-bars" role="img" aria-label="Check-ins per half hour, peaking at ${esc(fmtWindow(r.peak.start))} with ${r.peak.count}">
+            ${r.buckets.map((b) => `
+              <div class="rep-bar${b.start === r.peak.start ? " is-peak" : ""}">
+                <span class="rep-bar-n">${b.count}</span>
+                <i style="--h:${maxBucket ? b.count / maxBucket : 0}"></i>
+                <span class="rep-bar-t">${esc(fmtTime(new Date(b.start)))}</span>
+              </div>`).join("")}
+          </div>
+          <p class="rep-peak">Peak entry: ${esc(fmtWindow(r.peak.start))} · ${plural(r.peak.count, "check-in")}</p>
+          <p class="fine" style="margin:0">First check-in ${esc(fmtTime(new Date(r.firstAt)))} · Last check-in ${esc(fmtTime(new Date(r.lastAt)))}</p>`
+        : `<p class="fine" style="margin:0">No check-ins yet — the curve fills in as the gate scans.</p>`}
+      </section>
+      ${r.gates.length ? `
+      <section class="rep-card">
+        <h3 class="rep-h">By gate</h3>
+        ${r.gates.map((g) => `<p class="rep-line"><b>${esc(g.name)}</b> — ${g.in} in${g.bounced ? ` · ${g.bounced} bounced` : ""}</p>`).join("")}
+        ${r.busiest ? `<p class="rep-line">Busiest hour: ${fmtHour(r.busiest.hour)}–${fmtHour((r.busiest.hour + 1) % 24)} · ${plural(r.busiest.count, "check-in")}</p>` : ""}
+      </section>` : ""}
+      <section class="rep-card">
+        <h3 class="rep-h">Didn't show (${r.noShows.length})</h3>
+        ${!r.issued ? `<p class="fine" style="margin:0">No passes issued yet — send some out and this list names whoever stays away.</p>`
+        : r.noShows.length ? `<div class="rep-scroll"><ul class="passlist">${r.noShows.map((p) => `
+            <li>
+              <p class="pl-name">${esc(p.name)}</p>
+              <p class="pl-meta"><span class="pl-src">${PASS_SOURCE[p.source] || "Added by you"}</span></p>
+            </li>`).join("")}</ul></div>`
+        : `<p class="fine" style="margin:0">Everyone with a pass showed up.</p>`}
+      </section>
+    </div>`;
+  view.querySelector("#repPoster").style.backgroundImage = `url("${artUrl(ev.art)}")`;
+  view.querySelector("#repCopy").addEventListener("click", async () => {
+    (await copyText(reportSummaryText(ev, r))) ? toast("Summary copied") : toast("Couldn't copy", "x");
+  });
 }
 
 // ── gate code ──
@@ -1217,6 +1569,48 @@ function noteWaSent(state, p, refresh) {
   });
 }
 
+function remindMsgFor(state, p) {
+  const ev = state.ev;
+  const first = p.name.split(" ")[0];
+  return `Hi ${first}! A reminder that ${ev.name} is on ${fmtWhen(ev.starts_at)}${ev.venue ? ` at ${ev.venue}` : ""}. Your pass:\n${passUrl(p.token)}\nShow the QR at the gate. It works once, so don't share it.`;
+}
+// Pass holders a reminder can still reach: a phone WhatsApp can open,
+// and NOT checked in yet — reminding someone already inside is noise.
+// Checked-in state is the claim map, the same authority the counter uses.
+function remindAudience(state) {
+  return state.passes.filter((p) => !state.first.has(p.id) && !!sendHref(state, p)?.href);
+}
+
+// The reminder box's header line, in the delivery queue's words: the
+// counts describe pass holders who haven't checked in yet, split by
+// whether WhatsApp can reach them at all.
+function remindHead(state) {
+  const notIn = state.passes.filter((p) => !state.first.has(p.id));
+  if (!notIn.length) return "every pass holder has checked in already, so there is nobody left to remind.";
+  const reachable = remindAudience(state).length;
+  const noPhone = notIn.length - reachable;
+  return `for pass holders who haven't checked in yet. ${reachable} of ${notIn.length} still to come have a phone number${noPhone ? `; ${noPhone} ${noPhone === 1 ? "has" : "have"} no phone — use Email or Copy link for those` : ""}.`;
+}
+
+// The reminder twin of noteWaSent: the marker persists on the pass
+// (remindedAt, via state.markReminded) so nobody is reminded twice from
+// the queue and the count survives reloads. Optimistic with rollback,
+// and honest in the same way — it records the wa.me draft being opened,
+// never a WhatsApp delivery.
+function noteReminded(state, p, refresh) {
+  if (!p || state.reminded.has(p.id)) { refresh?.(); return; }
+  state.reminded.add(p.id);
+  const prev = p.reminded_at;
+  p.reminded_at = new Date().toISOString();
+  refresh?.();
+  Promise.resolve(state.markReminded?.(p)).catch(() => {
+    state.reminded.delete(p.id);
+    p.reminded_at = prev;
+    refresh?.();
+    toast("Couldn't save the reminder marker — count rolled back", "x");
+  });
+}
+
 function renderPassTools(state) {
   const el = view.querySelector("#passTools");
   view.querySelector("#pcount").textContent = state.passes.length ? plural(state.passes.length, "pass", "passes") : "";
@@ -1231,13 +1625,22 @@ function renderPassTools(state) {
     </div>
     <p class="fine" style="margin:0">GatePass sends nothing itself. Send each link yourself on WhatsApp or email; every link opens that person's pass.</p>
     <div class="stack" id="waBox" style="gap:8px">
-      <p class="fine" style="margin:0"><b>WhatsApp delivery</b> — ${waPasses(state).length} of ${state.passes.length} passes have a phone number${state.passes.length - waPasses(state).length ? `; ${state.passes.length - waPasses(state).length} have no phone — use Email or Copy link for those` : ""}. Each tap opens one WhatsApp chat with that person's pass already written in — you tap Send. Nothing is sent automatically. Each tap is marked on the pass, so the count survives reloads.</p>
+      <p class="fine" style="margin:0"><b>WhatsApp delivery</b> — ${waPasses(state).length} of ${state.passes.length} passes have a phone number${state.passes.length - waPasses(state).length ? `; ${state.passes.length - waPasses(state).length} ${state.passes.length - waPasses(state).length === 1 ? "has" : "have"} no phone — use Email or Copy link for those` : ""}. Each tap opens one WhatsApp chat with that person's pass already written in — you tap Send. Nothing is sent automatically. Each tap is marked on the pass, so the count survives reloads.</p>
       <div class="btns">
         <button class="btn small" type="button" id="waNext">${I.chat}Send next on WhatsApp</button>
         <button class="btn small" type="button" id="waCopyAll">${I.copy}Copy all WhatsApp messages</button>
       </div>
       <p class="fine" id="waStatus" style="margin:0">${state.waSent.size ? `${state.waSent.size} marked as sent` : "Not started yet — the first tap opens the first phone number on the list."}</p>
     </div>
+    ${state.markReminded ? `
+    <div class="stack" id="remindBox" style="gap:8px">
+      <p class="fine" style="margin:0"><b>WhatsApp reminders</b> — ${remindHead(state)} Each tap opens one WhatsApp chat with that person's reminder already written in — you tap Send. Nothing is sent automatically. Each tap is marked on the pass, so nobody is reminded twice and the count survives reloads.</p>
+      <div class="btns">
+        <button class="btn small" type="button" id="remindNext">${I.chat}Send next reminder</button>
+        <button class="btn small" type="button" id="remindCopyAll">${I.copy}Copy all reminder messages</button>
+      </div>
+      <p class="fine" id="remindStatus" style="margin:0">Not started yet.</p>
+    </div>` : ""}
     <div class="search"><span>${I.search}</span><input class="input" id="filter" placeholder="Search names" autocomplete="off" value="${esc(state.filter)}"></div>`;
   el.querySelector("#cpAll").addEventListener("click", async () => {
     const text = state.passes.map((p) => `${p.name}: ${passUrl(p.token)}`).join("\n");
@@ -1288,6 +1691,50 @@ function renderPassTools(state) {
     (await copyText(text)) ? toast(`${plural(waPasses(state).length, "WhatsApp message")} copied`) : toast("Couldn't copy", "x");
   });
   waStatus();
+  // Reminder queue (v2 dashboards): the delivery queue's interaction
+  // model aimed at a different audience — pass holders who haven't
+  // checked in yet — with its own persisted marker, so the two queues
+  // never double-count each other.
+  if (state.markReminded) {
+    const remindStatus = () => {
+      // Both numbers describe the SAME subset — phone-holders not yet
+      // checked in — and the label says so, like the delivery status.
+      const audience = remindAudience(state);
+      const statusEl = el.querySelector("#remindStatus");
+      const nextBtn = el.querySelector("#remindNext");
+      const done = audience.filter((p) => state.reminded.has(p.id)).length, total = audience.length;
+      if (!total) {
+        statusEl.textContent = state.passes.some((p) => sendHref(state, p)?.href)
+          ? "Everyone with a phone number has already checked in — nobody left to remind."
+          : "No pass holders have a phone number — reminders go out on WhatsApp, so use Email or Copy link for those.";
+        nextBtn.disabled = true;
+        return;
+      }
+      const next = audience.find((p) => !state.reminded.has(p.id));
+      statusEl.textContent = done >= total
+        ? `All ${total} with phone numbers reminded.`
+        : next
+          ? `${done} of ${total} with phone numbers reminded — next: ${next.name}.`
+          : `${done} of ${total} with phone numbers reminded — the rest have numbers WhatsApp can't open; use Email or Copy link for those.`;
+      nextBtn.disabled = !next;
+    };
+    state.refreshRemind = remindStatus;
+    el.querySelector("#remindNext").addEventListener("click", () => {
+      const next = remindAudience(state).find((p) => !state.reminded.has(p.id));
+      if (!next) return remindStatus();
+      const d = normalizePhone(next.contact);
+      if (!d) return remindStatus();
+      window.open(`https://wa.me/${d}?text=${encodeURIComponent(remindMsgFor(state, next))}`, "_blank", "noopener");
+      noteReminded(state, next, () => { remindStatus(); renderList(state); });
+    });
+    el.querySelector("#remindCopyAll").addEventListener("click", async () => {
+      const audience = remindAudience(state);
+      if (!audience.length) return;
+      const text = audience.map((p) => remindMsgFor(state, p)).join("\n\n");
+      (await copyText(text)) ? toast(`${plural(audience.length, "reminder")} copied`) : toast("Couldn't copy", "x");
+    });
+    remindStatus();
+  }
   let t;
   el.querySelector("#filter").addEventListener("input", (e) => { clearTimeout(t); t = setTimeout(() => { state.filter = e.target.value; state.shown = 120; renderList(state); }, 120); });
 }
@@ -1302,7 +1749,7 @@ function rowHtml(state, p) {
   return `
     <li data-id="${p.id}">
       <p class="pl-name">${esc(p.name)}</p>
-      <p class="pl-meta">${s ? `<span class="in">In ${esc(fmtTime(s.scanned_at))} · ${esc(s.gate)}</span> · ` : ""}<span class="pl-src">${PASS_SOURCE[p.source] || "Added by you"}</span> · ${esc(p.contact || "no contact")}${state.waSent.has(p.id) ? ` · WhatsApp marked sent` : ""}</p>
+      <p class="pl-meta">${s ? `<span class="in">In ${esc(fmtTime(s.scanned_at))} · ${esc(s.gate)}</span> · ` : ""}<span class="pl-src">${PASS_SOURCE[p.source] || "Added by you"}</span> · ${esc(p.contact || "no contact")}${state.waSent.has(p.id) ? ` · WhatsApp marked sent` : ""}${state.reminded.has(p.id) ? ` · Reminder marked sent` : ""}</p>
       <div class="pl-actions">
         ${send ? (send.email
           ? `<button class="icon-btn" type="button" data-email="${esc(p.token)}" aria-label="Email ${esc(p.name)} their pass photo" title="Email pass photo">${send.icon}</button>`
@@ -1312,6 +1759,78 @@ function rowHtml(state, p) {
         <a class="icon-btn" href="${esc(passUrl(p.token))}" target="_blank" rel="noopener" aria-label="Open ${esc(p.name)}'s pass" title="Open pass">${I.open}</a>
       </div>
     </li>`;
+}
+
+// ── payments (paid v2 events) ──
+// Orders live on the RSVP docs, one per member. The pill wording is the
+// honesty contract of the whole feature: a payment the member's browser
+// reported is PAID (UNVERIFIED) — real money only once the server-side
+// verifier has confirmed it with Razorpay (docs/paid-passes.md) — and
+// the collected total is labelled client-reported for the same reason.
+function renderPayments(state) {
+  const slot = view.querySelector("#paySlot");
+  if (!slot) return;
+  const p = state.payments;
+  if (!state.unified || !p || !(p.amountPaise > 0)) { slot.innerHTML = ""; return; }
+  const orders = p.orders || [];
+  const collected = orders
+    .filter((o) => o.pay_status === "client_paid_unverified")
+    .reduce((sum, o) => sum + (o.amount_paise || 0), 0);
+  const verified = orders
+    .filter((o) => o.pay_status === "verified")
+    .reduce((sum, o) => sum + (o.amount_paise || 0), 0);
+  const pill = (o) => o.pay_status === "verified"
+    ? `<span class="pay-pill is-verified">Paid (verified)</span>`
+    : o.pay_status === "client_paid_unverified"
+      ? `<span class="pay-pill is-unverified">Paid (unverified)</span>`
+      : `<span class="pay-pill is-unpaid">Unpaid</span>`;
+  slot.innerHTML = `
+    <div class="head-row section-gap-m"><h2 class="head">Payments</h2><span class="fine">${esc(formatPaise(p.amountPaise))} per pass</span></div>
+    <p class="fine" style="margin:0 0 6px">Collected (client-reported): <strong>${esc(formatPaise(collected))}</strong>${verified ? ` · Verified: <strong>${esc(formatPaise(verified))}</strong>` : ""}</p>
+    <p class="fine" style="margin:0 0 10px">Amounts are reported by each payer's browser until the payment verifier runs — treat PAID (UNVERIFIED) as “probably paid”, never as confirmed money. See docs/paid-passes.md.</p>
+    ${orders.length ? `<ul class="passlist" id="paylist">${orders.map((o) => `
+      <li data-payid="${esc(o.uid)}">
+        <p class="pl-name">${esc(o.name || "Guest")}</p>
+        <p class="pl-meta">${esc(formatPaise(o.amount_paise || p.amountPaise))} · ${pill(o)}${o.razorpay_payment_id ? ` · <span class="pay-id">${esc(o.razorpay_payment_id)}</span>` : ""}</p>
+      </li>`).join("")}</ul>`
+    : `<p class="fine">No orders yet — an order appears here the moment someone RSVPs to this paid event.</p>`}`;
+}
+
+// ── waitlist ──
+// Queued members hold no pass, so they live outside the pass list: their
+// own section, in queue order, with the one management action that makes
+// sense here — removal (a rejection with nothing to revoke). The section
+// renders only for unified (v2) dashboards that can fill up: an event
+// with a capacity, or a queue left over from when it had one.
+function renderWaitlist(state) {
+  const slot = view.querySelector("#waitlistSlot");
+  if (!slot) return;
+  const rows = state.waitlist || [];
+  if (!state.unified || (!state.capacity && !rows.length)) { slot.innerHTML = ""; return; }
+  slot.innerHTML = `
+    <div class="head-row section-gap-m"><h2 class="head">Waitlist</h2><span class="fine" id="wcount">${rows.length ? `${plural(rows.length, "person", "people")} waiting` : ""}</span></div>
+    ${rows.length ? `<ul class="passlist" id="wlist">${rows.map((w) => `
+      <li data-wid="${esc(w.uid)}">
+        <p class="pl-name">#${w.position} · ${esc(w.name || "Guest")}</p>
+        <p class="pl-meta"><span class="pl-src">${w.via === "guest" ? "Guest RSVP" : "RSVP"}</span> · ${esc(w.phone || w.email || "no contact")}</p>
+        <div class="pl-actions">
+          <button class="icon-btn" type="button" data-wremove="${esc(w.uid)}" aria-label="Remove ${esc(w.name || "guest")} from the waitlist" title="Remove from waitlist">${I.trash}</button>
+        </div>
+      </li>`).join("")}</ul>`
+    : `<p class="fine">Nobody is waiting — the waitlist fills when the event reaches capacity, and queued guests are promoted automatically when a spot frees.</p>`}`;
+  slot.querySelectorAll("[data-wremove]").forEach((b) => b.addEventListener("click", async () => {
+    b.disabled = true;
+    try {
+      await withTimeout(state.removeFromWaitlist(b.dataset.wremove), 30000);
+      state.waitlist = await withTimeout(state.reloadWaitlist());
+      renderWaitlist(state);
+      renderStat(state);
+      toast("Removed from the waitlist");
+    } catch (e) {
+      b.disabled = false;
+      toast(e.message || "Couldn't remove them", "x");
+    }
+  }));
 }
 
 function renderList(state) {
@@ -1428,6 +1947,7 @@ function startLive(state) {
         let claims = [];
         try { claims = await fb.getClaims(state.ev.gate_code); } catch {}
         if (!active) return;   // view was torn down while the fetch was in flight
+        state.claims = claims;
         state.first = new Map();
         for (const claim of claims) if (claim.is_first) state.first.set(claim.pass_id, claim);
         state.checked = state.first.size;

@@ -104,3 +104,41 @@ test("P6. projection with no claim fails", async () => {
   });
   await assertFails(as(null).doc(`gp_passes/${TOKEN}`).update({ checkedInAt: FIXED, gate: "Gate 1" }));
 });
+
+// ── Offline flush window (claim / repeat creates) ──
+// A gate phone that scanned with no signal replays the scan when signal
+// returns, and the claim must carry the ORIGINAL scan instant — so a
+// non-owner create may be backdated within a bounded window. Every other
+// guard (one-shot, token↔pass match, approved RSVP) is unchanged.
+const PASS2 = "pass-v2-b", TOKEN2 = "C".repeat(32);
+const seedClaimable = () => env.withSecurityRulesDisabled(async (ctx) => {
+  await ctx.firestore().doc(`gp_passes/${TOKEN2}`).set({ id: PASS2, eventId: EV2, name: "Test Two", checkedInAt: null, gate: "" });
+});
+const claimBody = (scannedAt) => ({ eventId: EV2, token: TOKEN2, name: "Test Two", gate: "Gate 1", device: "dev", scannedAt });
+
+test("C1. unauthenticated claim create at ~now succeeds", async () => {
+  await seedClaimable();
+  await assertSucceeds(as(null).doc(`gp_gates/${CODE}/claims/${PASS2}`).set(claimBody(new Date())));
+});
+
+test("C2. claim create backdated 2h (offline flush) succeeds", async () => {
+  await seedClaimable();
+  await assertSucceeds(as(null).doc(`gp_gates/${CODE}/claims/${PASS2}`).set(claimBody(new Date(Date.now() - 2 * 3600e3))));
+});
+
+test("C3. claim create backdated 8 days fails (outside the window)", async () => {
+  await seedClaimable();
+  await assertFails(as(null).doc(`gp_gates/${CODE}/claims/${PASS2}`).set(claimBody(new Date(Date.now() - 8 * 24 * 3600e3))));
+});
+
+test("C4. claim create with a future scannedAt fails", async () => {
+  await seedClaimable();
+  await assertFails(as(null).doc(`gp_gates/${CODE}/claims/${PASS2}`).set(claimBody(new Date(Date.now() + 3600e3))));
+});
+
+test("C5. repeat create backdated 2h succeeds against an existing claim", async () => {
+  // the main seed already wrote claims/${PASS}
+  await assertSucceeds(as(null).collection(`gp_gates/${CODE}/claims/${PASS}/repeats`).add({
+    eventId: EV2, gate: "Gate 1", device: "dev", scannedAt: new Date(Date.now() - 2 * 3600e3),
+  }));
+});

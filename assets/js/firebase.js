@@ -8,6 +8,7 @@ import {
   collection, query, where, orderBy, limit, writeBatch, runTransaction,
   arrayUnion, serverTimestamp, increment, onSnapshot,
 } from "firebase/firestore";
+import { parsePricePaise } from "./payments.js";
 
 const cfg = window.FIREBASE || {};
 export const configured = !!(cfg.apiKey && cfg.projectId && cfg.appId);
@@ -38,6 +39,18 @@ export function newToken() {
 }
 
 export const stamp = (v) => v?.toDate?.()?.toISOString?.() || v || null;
+
+// Public, owner-managed site config (gp_config/public). Holds ONLY
+// publishable values — currently the Razorpay key ID for paid passes.
+// The key SECRET must never be stored here (or anywhere client-side):
+// it belongs to the payment verifier Cloud Function. Read failures are
+// just "not configured".
+export async function getPublicConfig() {
+  try {
+    const s = await getDoc(doc(db, "gp_config", "public"));
+    return s.exists() ? s.data() : null;
+  } catch { return null; }
+}
 export const onAuth = (cb) => onAuthStateChanged(auth, (u) => cb(u || null));
 
 export async function signIn() {
@@ -439,9 +452,43 @@ export async function gateFind(code, text) {
   }));
 }
 
-export async function scanToken(code, token, gateName, device) {
+// The whole roster for a gate, in one read — the offline gate cache is
+// built from this (gate.js). Returns null when the code is invalid/rotated
+// (rules deny the read), so callers can tell "no cache possible" apart
+// from "empty event". Unlike gateFind this DOES return the token: the
+// caller is the gate page's local cache on the staff phone itself, and
+// offline validation is impossible without it. The token never leaves
+// the device from here — it is stored only in that phone's localStorage,
+// exactly the data this gate code already entitles the phone to read.
+export async function getGateRoster(code) {
+  let s;
+  try {
+    s = await getDocs(collection(db, GATES, code, "roster"));
+  } catch (e) {
+    if (e.code === "permission-denied") return null;
+    throw e;
+  }
+  return s.docs.map((d) => {
+    const r = d.data();
+    return {
+      id: d.id, name: r.name, hint: r.hint || "", token: r.token,
+      checkedInAt: stamp(r.checkedInAt), gate: r.gate || "",
+    };
+  });
+}
+
+export async function scanToken(code, token, gateName, device, opts = {}) {
   const gateRef = doc(db, GATES, code);
   const passRef = doc(db, PASS_PUB, token);
+  // Offline flush (gate.js) replays scans that were provisionally accepted
+  // with no network: opts.at is the ORIGINAL scan instant, and the claim
+  // must carry it — the stamp, the "first scan at" line and the reports
+  // all read scannedAt, so a flush-time serverTimestamp() would rewrite
+  // history. The rules bound how far back a non-owner create may reach
+  // (see firestore.rules); online scans pass no opts.at and keep the
+  // serverTimestamp() exactly as before.
+  const at = opts.at || null;
+  const stampValue = at ? new Date(at) : serverTimestamp();
 
   let gateSnap;
   try {
@@ -468,13 +515,13 @@ export async function scanToken(code, token, gateName, device) {
         const g = await tx.get(gateRef);
         const p = await tx.get(passRef);
         const existing = await tx.get(claimRef);
-        const at = new Date().toISOString();
-        const recent = [{ name: p.data().name, passId: p.data().id, gate: gateName, is_first: !existing.exists(), at }];
+        const atISO = at || new Date().toISOString();
+        const recent = [{ name: p.data().name, passId: p.data().id, gate: gateName, is_first: !existing.exists(), at: atISO }];
 
         if (!existing.exists()) {
           tx.set(claimRef, {
             eventId: g.data().eventId, token, name: p.data().name,
-            gate: gateName, device, scannedAt: serverTimestamp(),
+            gate: gateName, device, scannedAt: stampValue,
           });
           // SECURITY (21 Nov 2026): the scan writes ONLY the claim and the
           // gate counters here. It deliberately does NOT update the pass doc
@@ -486,12 +533,12 @@ export async function scanToken(code, token, gateName, device) {
             checked: increment(1),
             recent: [recent[0], ...(g.data().recent || [])].slice(0, 6),
           });
-          return { status: "ok", name: p.data().name, scanned_at: at,
+          return { status: "ok", name: p.data().name, scanned_at: atISO,
             counts: { ...countsOf(g.data()), checked: (g.data().checked || 0) + 1 } };
         }
 
         tx.set(doc(collection(db, GATES, code, "claims", p.data().id, "repeats")), {
-          eventId: g.data().eventId, gate: gateName, device, scannedAt: serverTimestamp(),
+          eventId: g.data().eventId, gate: gateName, device, scannedAt: stampValue,
         });
         tx.update(gateRef, {
           bounced: increment(1),
@@ -502,7 +549,7 @@ export async function scanToken(code, token, gateName, device) {
         // The claim is the only authority for the first scan; the public pass doc
         // is no longer used as a fallback (its stamp is owner-only now).
         const claim = existing.data();
-        const firstAt = stamp(claim.scannedAt) || at;
+        const firstAt = stamp(claim.scannedAt) || atISO;
         const firstGate = claim.gate || "";
         const firstDevice = claim.device;
         return {
@@ -586,13 +633,26 @@ export async function getClaims(code) {
     if (e.code === "permission-denied") return [];
     throw e;
   }
-  return snap.docs.map((d) => {
+  return Promise.all(snap.docs.map(async (d) => {
     const c = d.data();
+    // Repeat scans live in the claim's own repeats subcollection (written
+    // by scanToken). Attach them to the first-scan entry so consumers keep
+    // seeing one row per pass, and per-gate stats can count bounces where
+    // they actually happened. Repeats are advisory: a failed read degrades
+    // to "no repeats known", never to a failed claims load.
+    let repeats = [];
+    try {
+      const reps = await getDocs(collection(db, GATES, code, "claims", d.id, "repeats"));
+      repeats = reps.docs.map((r) => ({
+        gate: r.data().gate || "",
+        scanned_at: stamp(r.data().scannedAt),
+      }));
+    } catch { /* stats only — the first scan below is the authority */ }
     return {
       pass_id: d.id, is_first: true, gate: c.gate || "",
-      scanned_at: stamp(c.scannedAt),
+      scanned_at: stamp(c.scannedAt), repeats,
     };
-  });
+  }));
 }
 
 // ── Phase A: fests, sub-events, public registration ──
@@ -967,20 +1027,110 @@ export async function deleteV2Event(id) {
   }
 }
 
+// The member-readable issued-pass count: the gate doc's total. A member
+// cannot list passes or RSVPs, but the gate doc is readable by anyone
+// (the code is the capability) and the organiser dashboard keeps its
+// total reconciled with the real pass count. A missing/unreadable gate
+// doc reads as 0 — "not full" — so a capacity check can never block an
+// RSVP the pre-capacity flow would have allowed.
+async function gateIssuedCount(event) {
+  if (!event?.gateCode) return 0;
+  try {
+    const g = await getDoc(doc(db, GATES, event.gateCode));
+    return g.exists() ? g.data().total || 0 : 0;
+  } catch { return 0; }
+}
+
+// The owner-side issued-pass count, counted from the pass records
+// themselves (the organiser index array + one token doc per RSVP pass)
+// — the ground truth approveMember and promoteWaitlist gate on, immune
+// to any drift in the gate doc's increment-maintained total.
+async function issuedPassCount(eventId) {
+  const own = await getOrganiserPasses(eventId).catch(() => []);
+  const rsvps = await listRsvps(eventId);
+  let n = own.length;
+  await Promise.all(rsvps.map(async (r) => {
+    const t = await getDoc(doc(db, "gp_pass_tokens", eventId, "tokens", r.uid));
+    if (t.exists() && t.data().passToken) n++;
+  }));
+  return n;
+}
+
+// Waitlist order is RSVP creation order. createdAt is preserved across
+// re-RSVPs (see rsvpEvent) precisely so this ordering is stable; `at`
+// is the fallback for RSVPs written before createdAt existed. The uid
+// tiebreak keeps the order deterministic on same-millisecond writes.
+const rsvpOrderKey = (r) => r.created_at || r.at || "";
+const byRsvpOrder = (a, b) =>
+  String(rsvpOrderKey(a)).localeCompare(String(rsvpOrderKey(b))) || a.uid.localeCompare(b.uid);
+
 export async function rsvpEvent(eventId, user, answers = {}) {
   const u = user || auth.currentUser;
   const uid = u?.uid;
   if (!uid) throw new Error("Sign in required");
   const snap = await getDoc(doc(db, V2, eventId));
   const event = snap.exists() ? { id: eventId, ...snap.data() } : null;
-  // Approval events wait for the host; everything else issues the pass now.
-  // A missing event doc is treated as non-approval for backwards compatibility.
-  const approved = !event?.approval;
-  const token = newToken();
-  const status = approved ? "approved" : "pending";
   const rsvpRef = doc(db, RSVPS, eventId, RSVP_SUB, uid);
+  // Idempotent re-RSVP: a member who already holds a pass keeps THE SAME
+  // pass. Re-issuing used to mint a second pass doc (the first orphaned
+  // but still openable) and increment the gate total a second time, so
+  // the scanner's total drifted one above the real pass count per repeat
+  // RSVP — double-tap, sign-in retry, or re-entering the flow (found by
+  // the counts harness, 28 Nov 2026). A revoked member holds no token
+  // doc (revokePassBatch deletes it), so they still get a fresh pass.
+  const held = await getDoc(doc(db, "gp_pass_tokens", eventId, "tokens", uid));
+  const heldToken = held.exists() ? held.data().passToken : null;
+  // An existing RSVP keeps its createdAt across re-RSVPs: it is both the
+  // member's joined date and their waitlist queue position, and neither
+  // may churn because they re-submitted the form. A waitlisted member is
+  // never demoted back to pending by a re-RSVP either — the queue is
+  // drained by promoteWaitlist, not by resubmission.
+  const prev = await getDoc(rsvpRef);
+  const prevData = prev.exists() ? prev.data() : null;
+  const prevStatus = prevData?.status || null;
+  // Capacity caps ISSUED passes — organiser-issued and RSVP-issued
+  // together, the same count the gate doc totals. 0/absent is unlimited
+  // and takes exactly the pre-capacity path. A member who would be
+  // issued a pass into a full event is waitlisted instead: the RSVP is
+  // recorded, but no pass doc, token doc, roster row or gate increment
+  // is written for them.
+  const capacity = Number(event?.capacity) || 0;
+  // Paid events (price parses to a positive amount) record an ORDER on
+  // the RSVP and issue NOTHING until the payment completes: rsvpEvent
+  // only writes the unpaid order, completePaidRsvp makes the real status
+  // call once the browser reports a payment. A member whose payment is
+  // already on record (client_paid_unverified / verified) re-RSVPing —
+  // editing details, resubmitting after a rejection — keeps their paid
+  // state and takes the normal path below; their payment is never
+  // dropped back to unpaid by a form resubmission.
+  const amountPaise = parsePricePaise(event?.price);
+  const paidEvent = amountPaise > 0;
+  const prevPayStatus = prevData?.pay_status || null;
+  const alreadyPaid = prevPayStatus === "client_paid_unverified" || prevPayStatus === "verified";
+  let status, issue = false;
+  if (heldToken) {
+    status = "approved";
+  } else if (paidEvent && !alreadyPaid) {
+    // Parked as "pending" (awaiting payment): no pass, no capacity spot
+    // consumed. completePaidRsvp moves them to approved / waitlisted /
+    // approval-pending with the payment recorded.
+    status = prevStatus === "waitlisted" ? "waitlisted" : "pending";
+  } else if (event?.approval) {
+    // Approval events wait for the host; everything else issues the pass now.
+    // A missing event doc is treated as non-approval for backwards compatibility.
+    status = prevStatus === "waitlisted" ? "waitlisted" : "pending";
+  } else if (capacity > 0 || prevStatus === "waitlisted") {
+    // A queued member re-RSVPing after a spot freed is issued directly;
+    // one re-RSVPing into a still-full event stays queued.
+    const issued = await gateIssuedCount(event);
+    if (capacity > 0 && issued >= capacity) status = "waitlisted";
+    else { status = "approved"; issue = true; }
+  } else {
+    status = "approved"; issue = true;
+  }
+  const token = heldToken || (issue ? newToken() : null);
   const batch = writeBatch(db);
-  batch.set(rsvpRef, {
+  const rsvpDoc = {
     name: answers.name ?? u.displayName ?? "",
     email: answers.email ?? u.email ?? "",
     phone: answers.phone ?? "",
@@ -992,18 +1142,116 @@ export async function rsvpEvent(eventId, user, answers = {}) {
     via: u.isAnonymous ? "guest" : "account",
     status,
     at: serverTimestamp(),
-    createdAt: serverTimestamp(),
+    createdAt: prevData?.createdAt ?? serverTimestamp(),
     updatedAt: serverTimestamp(),
-  });
+  };
+  // The waitlist position is stamped by the owner's promoteWaitlist
+  // pass; a member write must not wipe it while they stay queued.
+  if (status === "waitlisted" && prevData?.waitlistPosition != null) {
+    rsvpDoc.waitlistPosition = prevData.waitlistPosition;
+  }
+  // The order record rides on the RSVP doc (paid events only — a free
+  // event's RSVP must stay byte-for-byte what it has always been). The
+  // amount is stamped from the event's CURRENT price at RSVP time;
+  // completePaidRsvp re-stamps it with the amount actually charged.
+  // pay_status starts "unpaid" and only ever moves to
+  // "client_paid_unverified" from the browser — "verified" is written
+  // exclusively by the server-side verifier (docs/paid-passes.md), and
+  // the rules refuse any member write that sets it.
+  if (paidEvent) {
+    rsvpDoc.amount_paise = alreadyPaid ? (prevData.amount_paise ?? amountPaise) : amountPaise;
+    rsvpDoc.currency = "INR";
+    rsvpDoc.pay_status = alreadyPaid ? prevPayStatus : "unpaid";
+    rsvpDoc.razorpay_payment_id = alreadyPaid ? (prevData.razorpay_payment_id ?? null) : null;
+    rsvpDoc.pay_updated_at = prevData?.pay_updated_at ?? serverTimestamp();
+  }
+  batch.set(rsvpRef, rsvpDoc);
   // The public name projection belongs to the RSVP, not to the pass: pending
   // approval members must still appear in attendee counts (and see their own
   // status banner) before a pass has been issued.
   batch.set(doc(db, "gp_members_public", eventId, "m", uid), {
     name: answers.name ?? u.displayName ?? "",
   });
-  if (approved) issuePassBatch(batch, event || { id: eventId }, uid, answers, rsvpRef, token);
+  if (issue) issuePassBatch(batch, event || { id: eventId }, uid, answers, rsvpRef, token);
   await batch.commit();
-  return { status, passToken: approved ? token : null };
+  return {
+    status, passToken: status === "approved" ? token : null,
+    payStatus: paidEvent ? rsvpDoc.pay_status : null,
+    amountPaise: paidEvent ? amountPaise : 0,
+  };
+}
+
+// Record a browser-reported payment and finish the RSVP. Called by the
+// event page after Razorpay's checkout handler fires.
+//
+// ORDER OF OPERATIONS for a paid event:
+//   1. rsvpEvent            → RSVP + order (pay_status "unpaid"), no pass
+//   2. Razorpay checkout    → the member pays in Razorpay's modal
+//   3. completePaidRsvp     → pay_status "client_paid_unverified" +
+//                             the status decision below, pass issued
+//   4. verifier (server)    → pay_status "verified" once Razorpay's API
+//                             confirms the money (docs/paid-passes.md)
+//
+// The status decision mirrors rsvpEvent's, made WITH the payment on
+// record: approval events stay pending (payment lands BEFORE the
+// approval queue — the host approves a member who has already paid);
+// a full event waitlists the payer with their payment recorded (their
+// pass is issued by promoteWaitlist when a spot frees); otherwise the
+// pass issues now. A member who already holds a pass just gets the
+// payment recorded. A "verified" order is never downgraded by a
+// browser report.
+export async function completePaidRsvp(eventId, paymentId, amountPaise, user, proof = {}) {
+  const u = user || auth.currentUser;
+  const uid = u?.uid;
+  if (!uid) throw new Error("Sign in required");
+  if (!paymentId) throw new Error("Missing payment id");
+  const rsvpRef = doc(db, RSVPS, eventId, RSVP_SUB, uid);
+  const [evSnap, rsvpSnap, held] = await Promise.all([
+    getDoc(doc(db, V2, eventId)),
+    getDoc(rsvpRef),
+    getDoc(doc(db, "gp_pass_tokens", eventId, "tokens", uid)),
+  ]);
+  if (!evSnap.exists()) throw new Error("Event not found");
+  if (!rsvpSnap.exists()) throw new Error("RSVP not found — RSVP first, then pay");
+  const event = { id: eventId, ...evSnap.data() };
+  const rsvp = rsvpSnap.data();
+  const heldToken = held.exists() ? held.data().passToken : null;
+  if (rsvp.pay_status === "verified") {
+    return { status: rsvp.status || "approved", passToken: heldToken, payStatus: "verified" };
+  }
+  const patch = {
+    pay_status: "client_paid_unverified",
+    razorpay_payment_id: String(paymentId),
+    pay_updated_at: serverTimestamp(),
+  };
+  if (amountPaise) patch.amount_paise = amountPaise;
+  // Kept when Razorpay provides them so the server-side verifier can
+  // check the signature as well as the payment itself. Useless without
+  // the key secret, so storing them client-side is safe.
+  if (proof?.orderId) patch.razorpay_order_id = String(proof.orderId);
+  if (proof?.signature) patch.razorpay_signature = String(proof.signature);
+  const batch = writeBatch(db);
+  if (heldToken) {
+    batch.update(rsvpRef, patch);
+    await batch.commit();
+    return { status: "approved", passToken: heldToken, payStatus: "client_paid_unverified" };
+  }
+  if (event.approval) {
+    batch.update(rsvpRef, patch);
+    await batch.commit();
+    return { status: "pending", passToken: null, payStatus: "client_paid_unverified" };
+  }
+  const capacity = Number(event.capacity) || 0;
+  if (capacity > 0 && (await gateIssuedCount(event)) >= capacity) {
+    batch.update(rsvpRef, { ...patch, status: "waitlisted" });
+    await batch.commit();
+    return { status: "waitlisted", passToken: null, payStatus: "client_paid_unverified" };
+  }
+  const token = newToken();
+  batch.update(rsvpRef, { ...patch, status: "approved" });
+  issuePassBatch(batch, event, uid, rsvp.answers || {}, rsvpRef, token);
+  await batch.commit();
+  return { status: "approved", passToken: token, payStatus: "client_paid_unverified" };
 }
 
 export async function approveMember(eventId, uid) {
@@ -1014,13 +1262,34 @@ export async function approveMember(eventId, uid) {
     getDoc(doc(db, V2, eventId)),
   ]);
   if (!rsvp.exists() || !event.exists()) throw new Error("RSVP or event not found");
-  const token = newToken();
+  // Approving an already-approved member must not mint a second pass or
+  // bump the gate total again (same idempotency rule as rsvpEvent).
+  const held = await getDoc(doc(db, "gp_pass_tokens", eventId, "tokens", uid));
+  const heldToken = held.exists() ? held.data().passToken : null;
   const rsvpRef = doc(db, RSVPS, eventId, RSVP_SUB, uid);
+  if (!heldToken && Number(event.data().capacity) > 0) {
+    // Capacity gate: approving into a full event waitlists the member
+    // instead of minting pass #capacity+1. The approval itself is
+    // recorded (reviewedAt/reviewedBy) — the member has been accepted,
+    // they are simply queued — and promoteWaitlist issues their pass
+    // the moment a spot frees. Pending members never consume a spot:
+    // the count only includes passes that actually exist.
+    const issued = await issuedPassCount(eventId);
+    if (issued >= Number(event.data().capacity)) {
+      const batch = writeBatch(db);
+      batch.update(rsvpRef, {
+        status: "waitlisted", reviewedAt: serverTimestamp(), reviewedBy: by,
+      });
+      await batch.commit();
+      return { status: "waitlisted", passToken: null };
+    }
+  }
+  const token = heldToken || newToken();
   const batch = writeBatch(db);
   batch.update(rsvpRef, {
     status: "approved", reviewedAt: serverTimestamp(), reviewedBy: by,
   });
-  issuePassBatch(batch, { id: eventId, ...event.data() }, uid, rsvp.data().answers || {}, rsvpRef, token);
+  if (!heldToken) issuePassBatch(batch, { id: eventId, ...event.data() }, uid, rsvp.data().answers || {}, rsvpRef, token);
   await batch.commit();
   return { status: "approved", passToken: token };
 }
@@ -1034,6 +1303,101 @@ export async function rejectMember(eventId, uid) {
     status: "rejected", reviewedAt: serverTimestamp(), reviewedBy: by,
   });
   await batch.commit();
+  // The rejection freed this member's spot (and, when the rejected
+  // member was themselves queued, shortens the queue): drain the
+  // waitlist. Quiet — a failed promotion must never mask the rejection
+  // that already succeeded; the next dashboard load retries.
+  await promoteWaitlistQuiet(eventId);
+}
+
+// ── Waitlist ───────────────────────────────────────────────────────────
+// A waitlisted RSVP is a queued member with NO pass: no token doc, no
+// roster row, no gate increment — promotion is the only way off the
+// queue. Promotion is owner-side by design, and needs no rules change:
+// the member grants in firestore.rules already let a member create
+// their own RSVP with status "waitlisted" (memberCreateApprovalOk only
+// forbids self-"approved" on approval events), while every write below
+// (someone else's RSVP status, their token doc, roster row, gate
+// increment) rides the exact owner grants approveMember already used.
+const promotingNow = new Set();
+export async function promoteWaitlist(eventId) {
+  const by = auth.currentUser?.uid;
+  if (!by) throw new Error("Sign in required");
+  // Client-level race tolerance: two triggers in the same page (a
+  // dashboard load racing a reject, a double-tap) must not both drain
+  // the queue. The second caller is a no-op — the in-flight pass
+  // re-reads fresh state for every member it touches anyway.
+  if (promotingNow.has(eventId)) return { promoted: [], skipped: true };
+  promotingNow.add(eventId);
+  try {
+    const ev = await getDoc(doc(db, V2, eventId));
+    if (!ev.exists()) throw new Error("Event not found");
+    if (ev.data().ownerId !== by) throw new Error("Only the host can promote the waitlist");
+    const event = { id: eventId, ...ev.data() };
+    const capacity = Number(event.capacity) || 0;
+    const rsvps = await listRsvps(eventId);
+    const queued = rsvps.filter((r) => r.status === "waitlisted").sort(byRsvpOrder);
+    if (!queued.length) return { promoted: [] };
+    // An unlimited event drains its whole queue: a capacity removed
+    // after people queued must not strand them.
+    let free = capacity > 0 ? capacity - await issuedPassCount(eventId) : queued.length;
+    const promoted = [];
+    const remaining = [];
+    for (const w of queued) {
+      // Re-check the member's CURRENT state immediately before touching
+      // them — a racing reject or promotion may have moved them, and a
+      // member who somehow already holds a pass must never be issued a
+      // second one (the 2580b58 idempotency rule).
+      const cur = await getDoc(doc(db, RSVPS, eventId, RSVP_SUB, w.uid));
+      if (!cur.exists() || cur.data().status !== "waitlisted") continue;
+      const held = await getDoc(doc(db, "gp_pass_tokens", eventId, "tokens", w.uid));
+      const hasPass = held.exists() && !!held.data().passToken;
+      if (!hasPass && free <= 0) { remaining.push(w); continue; }
+      const rsvpRef = doc(db, RSVPS, eventId, RSVP_SUB, w.uid);
+      const batch = writeBatch(db);
+      batch.update(rsvpRef, {
+        status: "approved", reviewedAt: serverTimestamp(), reviewedBy: by,
+        waitlistPosition: null,
+      });
+      if (!hasPass) {
+        issuePassBatch(batch, event, w.uid, cur.data().answers || {}, rsvpRef, newToken());
+        free--;
+      }
+      await batch.commit();
+      promoted.push(w.uid);
+    }
+    // Re-stamp live positions on everyone still queued, so a member's
+    // own event page can show "you're #N on the waitlist" from their
+    // RSVP doc — the one waitlist record a member may read.
+    if (remaining.length) {
+      const batch = writeBatch(db);
+      remaining.forEach((w, i) => {
+        batch.update(doc(db, RSVPS, eventId, RSVP_SUB, w.uid), { waitlistPosition: i + 1 });
+      });
+      await batch.commit();
+    }
+    return { promoted };
+  } finally {
+    promotingNow.delete(eventId);
+  }
+}
+
+// Promotion as a side effect (a reject/removal freed a spot): failures
+// are logged, never thrown — the primary action already succeeded, and
+// the next dashboard load retries the queue. (When the caller is the
+// departing member themselves, the owner checks above make this a
+// no-op; only an owner-side pass can actually promote.)
+async function promoteWaitlistQuiet(eventId) {
+  try { await promoteWaitlist(eventId); }
+  catch (e) { console.warn("waitlist promotion skipped:", e); }
+}
+
+// The event's waitlist in queue order, each row carrying its live
+// 1-based position. Owner-side (listRsvps is owner/self only).
+export async function listWaitlist(eventId) {
+  const rsvps = await listRsvps(eventId);
+  return rsvps.filter((r) => r.status === "waitlisted").sort(byRsvpOrder)
+    .map((r, i) => ({ ...r, position: i + 1 }));
 }
 
 // The member's own RSVP is the source of truth for approval state; the pass
@@ -1048,6 +1412,15 @@ export async function requestPass(eventId) {
   return {
     status: r.status || "approved",
     passToken: tok.exists() ? tok.data().passToken || null : null,
+    // Live queue position for a waitlisted member, stamped onto the
+    // RSVP by the owner's promoteWaitlist pass (null once promoted or
+    // before the first owner-side pass has run).
+    waitlistPosition: r.waitlistPosition ?? null,
+    // The member's own order state (paid events only; null on free
+    // events) plus the contact details the checkout prefill reuses.
+    payStatus: r.pay_status || null,
+    amountPaise: r.amount_paise || 0,
+    name: r.name || "", email: r.email || "", phone: r.phone || "",
   };
 }
 
@@ -1098,6 +1471,11 @@ export async function deleteRsvp(eventId, uid) {
   batch.delete(doc(db, "gp_members_public", eventId, "m", uid));
   batch.delete(doc(db, RSVPS, eventId, RSVP_SUB, uid));
   await batch.commit();
+  // The removal freed a spot: drain the waitlist (quiet side effect —
+  // see promoteWaitlistQuiet; a member cancelling their own RSVP can't
+  // promote anyone, so for them this is a no-op and the organiser's
+  // next dashboard load does it).
+  await promoteWaitlistQuiet(eventId);
 }
 
 export async function cancelRsvp(eventId, user) {
@@ -1117,7 +1495,23 @@ export async function listRsvps(eventId) {
       answers: r.answers || {},
       status: r.status || "approved",
       via: r.via || "",
+      waitlist_position: r.waitlistPosition ?? null,
+      // Whether a position was ever stamped on the doc at all.
+      // promoteWaitlist clears a promoted member's position to null
+      // EXPLICITLY, while a member who never queued has no field —
+      // that distinction is the only durable trace that an approved
+      // member came off the waitlist, and the report's promoted
+      // count reads it (approved + stamped + position null).
+      waitlist_stamped: "waitlistPosition" in r,
       wa_sent_at: stamp(r.waSentAt),
+      reminded_at: stamp(r.remindedAt),
+      // Order state for paid events (absent/null on free events):
+      // pay_status is "unpaid" | "client_paid_unverified" | "verified".
+      pay_status: r.pay_status || null,
+      amount_paise: r.amount_paise || 0,
+      currency: r.currency || "",
+      razorpay_payment_id: r.razorpay_payment_id || null,
+      pay_updated_at: stamp(r.pay_updated_at),
       at: stamp(r.at),
       created_at: stamp(r.createdAt),
       updated_at: stamp(r.updatedAt),
@@ -1160,6 +1554,7 @@ export async function getOrganiserPasses(eventId) {
     id: p.id, name: p.name || "", contact: p.contact || "",
     token: p.token, created_at: p.created_at || "",
     wa_sent_at: p.waSentAt || "",
+    reminded_at: p.remindedAt || "",
   }));
 }
 
@@ -1176,6 +1571,23 @@ export async function markOrganiserPassWaSent(eventId, passId) {
   const at = new Date().toISOString();
   const rows = (s.data().passes || []).map((p) =>
     p.id === passId ? { ...p, waSentAt: at } : p);
+  await updateDoc(ref, { passes: rows });
+  return at;
+}
+
+// WhatsApp "reminder marked" stamp for an organiser-issued v2 pass: the
+// same index-doc array write as the delivery marker, a different field.
+// It records that the organiser opened the wa.me reminder draft for this
+// pass — never that WhatsApp delivered anything.
+export async function markOrganiserPassReminded(eventId, passId) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error("Sign in required");
+  const ref = doc(db, "gp_users", uid, CREATED, eventId);
+  const s = await getDoc(ref);
+  if (!s.exists()) throw new Error("Event not found");
+  const at = new Date().toISOString();
+  const rows = (s.data().passes || []).map((p) =>
+    p.id === passId ? { ...p, remindedAt: at } : p);
   await updateDoc(ref, { passes: rows });
   return at;
 }
@@ -1204,6 +1616,7 @@ export async function getRsvpPasses(eventId) {
       email: r.email || "", phone: r.phone || "",
       token, created_at: r.created_at || r.at || "",
       wa_sent_at: r.wa_sent_at || "",
+      reminded_at: r.reminded_at || "",
       source: r.via === "guest" ? "guest" : "rsvp",
     };
   }));
@@ -1217,6 +1630,27 @@ export async function markRsvpWaSent(eventId, uid) {
   if (!auth.currentUser?.uid) throw new Error("Sign in required");
   await updateDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid), { waSentAt: serverTimestamp() });
   return new Date().toISOString();
+}
+
+// WhatsApp "reminder marked" stamp for an RSVP-issued pass: a field on
+// the RSVP doc itself, same pattern (and same honesty) as markRsvpWaSent.
+export async function markRsvpReminded(eventId, uid) {
+  if (!auth.currentUser?.uid) throw new Error("Sign in required");
+  await updateDoc(doc(db, RSVPS, eventId, RSVP_SUB, uid), { remindedAt: serverTimestamp() });
+  return new Date().toISOString();
+}
+
+// Reconcile the gate doc's `total` with the real issued-pass count. The
+// counter is maintained by increments on every issuance path and a
+// decrement on revoke, but a doc drifted by an older build or an
+// interrupted write would otherwise make the gate scanner disagree with
+// the organiser dashboard forever (live test event, 28 Nov 2026: gate
+// said 4, five passes existed). The dashboard's unified list IS the
+// count, so the owner writes it back on load. Owner-only under the
+// rules (the v2 gate update grant); callers surface failures.
+export async function repairGateTotal(code, total) {
+  if (!auth.currentUser?.uid) throw new Error("Sign in required");
+  await updateDoc(doc(db, GATES, code), { total });
 }
 
 export async function generatePassesV2(eventId, rows, { gateCode, publicEvent }) {

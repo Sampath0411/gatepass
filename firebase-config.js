@@ -21,4 +21,14 @@ window.FIREBASE = {
   // OAuth client ID (Web application) for the organiser's Google Sheet access.
   // Google Cloud → APIs & Services → Credentials; authorised origin = your deployed domain.
   googleOAuthClientId: "646944374445-ecs2s80bs5kqlpm5heu8ksuglod2nrpr.apps.googleusercontent.com",
+  // Optional: Razorpay KEY ID for paid passes (docs/paid-passes.md). The
+  // key ID is a public identifier — safe to ship here. The key SECRET
+  // must NEVER be put in this file (or anywhere client-side); it belongs
+  // only to the payment-verifier Cloud Function. Until a key ID is set,
+  // paid events record RSVPs as unpaid and tell members payments aren't
+  // switched on yet. Alternatively set the key ID without a redeploy in
+  // Firestore: gp_config/public → razorpayKeyId.
+  // razorpayKeyId: "rzp_test_...",
 };
+// The payments module also honours a standalone global, if you prefer:
+// window.GP_RAZORPAY_KEY_ID = "rzp_test_...";

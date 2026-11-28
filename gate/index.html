@@ -116,6 +116,13 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       <div class="bar"><i id="cBar"></i></div>
     </div>
 
+    <div class="gate-sync" id="gateSync">
+      <span class="conn-pill" id="connPill"><i class="conn-dot" aria-hidden="true"></i><span id="connText">Online</span></span>
+      <span class="sync-pending" id="syncPending" hidden></span>
+      <button class="btn small" type="button" id="syncBtn" hidden>Sync now</button>
+      <p class="sync-summary" id="syncSummary" role="status" hidden></p>
+    </div>
+
     <p class="fine gate-help" style="margin:10px 0 0">Dead phone or cracked screen? Tap&nbsp;${search}&nbsp;on the camera to find a guest by name. Camera won't start? Tap&nbsp;${camera}&nbsp;to scan a photo.</p>
 
     <form id="manualForm" class="manual-entry" novalidate>

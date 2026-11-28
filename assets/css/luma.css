@@ -628,8 +628,11 @@ body.luma .l-status-banner {
 }
 body.luma .l-status-banner svg { width: 15px; height: 15px; margin-top: 1px; }
 body.luma .l-status-banner.is-pending { background: var(--l-warn-tint); border: 2px dotted var(--l-warn-ink); color: var(--l-warn-ink); }
+body.luma .l-status-banner.is-waitlisted { background: var(--l-pink-tint-2); border: 2px dotted var(--l-pink-ink); color: var(--l-pink-ink); }
 body.luma .l-status-banner.is-rejected { background: var(--l-stop-tint); border: 2px dotted var(--l-stop-ink); color: var(--l-stop-ink); }
 body.luma .l-status-banner.is-approved { background: var(--l-go-tint); border: 2px dotted var(--l-go); color: var(--l-go-ink); }
+body.luma .l-status-banner.is-payment { background: var(--l-warn-tint); border: 2px dotted var(--l-warn-ink); color: var(--l-warn-ink); }
+body.luma .l-pay-note { margin: 10px 0 0; font-size: 12px; line-height: 1.5; color: var(--l-ink-soft); }
 body.luma .l-rsvp-card .l-pass-link {
   display: flex; align-items: center; justify-content: center; gap: 8px;
   height: 48px; margin-top: 18px; border-radius: var(--l-r-btn);
@@ -769,6 +772,11 @@ body.luma .l-status-pill {
 body.luma .l-status-pill.is-approved { background: var(--l-go-tint); color: var(--l-go-ink); border: 1.5px solid var(--l-go); }
 body.luma .l-status-pill.is-pending { background: var(--l-warn-tint); color: var(--l-warn-ink); border: 1.5px solid var(--l-warn-ink); }
 body.luma .l-status-pill.is-rejected { background: var(--l-stop-tint); color: var(--l-stop-ink); border: 1.5px solid var(--l-stop); }
+body.luma .l-status-pill.is-waitlisted { background: var(--l-pink-tint-2); color: var(--l-pink-ink); border: 1.5px solid var(--l-pink-ink); }
+body.luma .l-status-pill.is-pay-unverified { background: var(--l-warn-tint); color: var(--l-warn-ink); border: 1.5px solid var(--l-warn-ink); margin-left: 6px; }
+body.luma .l-status-pill.is-pay-verified { background: var(--l-go-tint); color: var(--l-go-ink); border: 1.5px solid var(--l-go); margin-left: 6px; }
+body.luma .l-status-pill.is-pay-unpaid { background: var(--l-stop-tint); color: var(--l-stop-ink); border: 1.5px solid var(--l-stop); margin-left: 6px; }
+body.luma .l-wait-pos { margin-left: 6px; font-size: 11.5px; font-weight: 700; color: var(--l-pink-ink); }
 body.luma .l-table-empty { text-align: center; color: var(--l-ink-soft) !important; padding: 26px 13px !important; }
 body.luma .l-member-empty { margin: 14px 0 0; text-align: center; font-size: 12.5px; color: var(--l-ink-soft); }
 
@@ -810,6 +818,9 @@ body.luma {
   --stop-tint: #FBE0E6;
   --go-ink: #0E6F3F;
   --stop-ink: #B50E3B;
+  --warn: #D98E04;
+  --warn-tint: #FBEACB;
+  --warn-ink: #8A5700;
 }
 
 /* page frame: same measure and breathing room as .l-main */
@@ -1041,6 +1052,9 @@ html[data-theme="dark"] body.luma {
   --stop-tint: #3A1826;
   --go-ink: #6DE3A0;
   --stop-ink: #FF8FA5;
+  --warn: #E8A33D;
+  --warn-tint: #3D2E12;
+  --warn-ink: #F2C063;
 
   color-scheme: dark;
 }
@@ -1119,3 +1133,44 @@ html[data-theme="dark"] body.luma .t-qr svg {
 html[data-theme="dark"] body.luma .gate-qr svg {
   background: #fff; border-radius: 8px; padding: 6px;
 }
+
+/* ── post-event report (organiser #/e/<id>/report) ─────────────
+   One screenshot-clean column on the same stock as everything else.
+   Every colour below is a palette variable, remapped per theme
+   above, so the report prints right in light and dark alike. */
+body.luma .rep-card {
+  background: var(--paper-hi); border: 2px solid var(--blue-line);
+  border-radius: var(--l-r-row); padding: 18px 20px;
+}
+body.luma .rep-h {
+  font: 600 15px/1.1 var(--l-f-display); letter-spacing: .1em;
+  text-transform: uppercase; color: var(--blue); margin: 0 0 12px;
+}
+body.luma .rep-stats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px;
+}
+body.luma .rep-tile { background: var(--pink-tint-2); border-radius: var(--l-r-row); padding: 14px 16px; }
+body.luma .rep-tile b { display: block; font: 700 30px/1 var(--l-f-display); color: var(--pink-display); }
+body.luma .rep-tile span {
+  display: block; margin-top: 5px; font: 600 12px/1.25 var(--l-f-ui);
+  letter-spacing: .07em; text-transform: uppercase; color: var(--blue-soft);
+}
+body.luma .rep-bars {
+  display: flex; align-items: flex-end; gap: 6px; height: 148px;
+  overflow-x: auto; padding-top: 4px;
+}
+body.luma .rep-bar {
+  flex: 1 0 30px; height: 100%; display: flex; flex-direction: column;
+  align-items: center; justify-content: flex-end; gap: 4px;
+}
+body.luma .rep-bar i {
+  display: block; width: 100%; max-width: 46px; height: calc(var(--h, 0) * 96px);
+  min-height: 3px; background: var(--pink-track); border-radius: 6px 6px 0 0;
+}
+body.luma .rep-bar.is-peak i { background: var(--pink); }
+body.luma .rep-bar-n { font: 700 14px/1 var(--l-f-display); color: var(--pink-ink); }
+body.luma .rep-bar-t { font: 600 11px/1 var(--l-f-ui); color: var(--blue-soft); white-space: nowrap; }
+body.luma .rep-peak { font: 600 16px/1.3 var(--l-f-ui); color: var(--pink-ink); margin: 12px 0 4px; }
+body.luma .rep-line { font: 500 15px/1.35 var(--l-f-ui); color: var(--blue); margin: 0 0 6px; }
+body.luma .rep-line b { color: var(--pink-ink); }
+body.luma .rep-scroll { max-height: 330px; overflow-y: auto; }

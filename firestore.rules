@@ -56,6 +56,24 @@ service cloud.firestore {
              get(/databases/$(database)/documents/gp_fests/$(data.festId)/events/$(data.eventId)).data.get('gateCode', ''), data);
     }
 
+    // Offline gate flush: a gate phone with no signal accepts scans
+    // provisionally and replays them when signal returns, and the claim
+    // must carry the ORIGINAL scan instant — the stamp projection, the
+    // "first scan at" line and the per-gate reports all read scannedAt,
+    // so a flush-time request.time would rewrite when the guest actually
+    // entered. A non-owner claim/repeat create may therefore carry a
+    // client timestamp in the recent past. The window is bounded (never
+    // the future, at most 7 days back) and every other guard on those
+    // creates still applies — one-shot (!exists on claims), the token
+    // must match the pass doc, an RSVP pass must be approved — so the
+    // only thing this loosens is when a genuine scan is said to have
+    // happened, and only for someone already holding the gate code.
+    function offlineScanTimeOk(t) {
+      return t is timestamp
+        && t <= request.time
+        && t >= request.time - duration.value(7, 'd');
+    }
+
     // Organiser's event list index — scoped by uid so no query rules are needed.
     match /gp_users/{uid}/events/{eventId} {
       allow read, create, update, delete: if signedIn() && uid == request.auth.uid;
@@ -238,7 +256,8 @@ service cloud.firestore {
         // can be claimed. Legacy passes have no RSVP doc, hence !exists().
         && (!exists(/databases/$(database)/documents/gp_rsvps/$(request.resource.data.eventId)/rsvps/$(passId))
             || get(/databases/$(database)/documents/gp_rsvps/$(request.resource.data.eventId)/rsvps/$(passId)).data.status == 'approved')
-        && (isOwner(request.resource.data.eventId) || request.resource.data.scannedAt == request.time)
+        && (isOwner(request.resource.data.eventId) || request.resource.data.scannedAt == request.time
+            || offlineScanTimeOk(request.resource.data.scannedAt))
         && request.resource.data.keys().hasOnly(['eventId', 'token', 'name', 'gate', 'device', 'scannedAt'])
         && request.resource.data.keys().hasAll(['eventId', 'token', 'name', 'gate', 'device', 'scannedAt']);
       allow update: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
@@ -248,7 +267,8 @@ service cloud.firestore {
     match /gp_gates/{code}/claims/{passId}/repeats/{rid} {
       allow read: if exists(/databases/$(database)/documents/gp_gates/$(code));
       allow create: if get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId == request.resource.data.eventId
-        && (isOwner(request.resource.data.eventId) || request.resource.data.scannedAt == request.time)
+        && (isOwner(request.resource.data.eventId) || request.resource.data.scannedAt == request.time
+            || offlineScanTimeOk(request.resource.data.scannedAt))
         && request.resource.data.keys().hasOnly(['eventId', 'gate', 'device', 'scannedAt'])
         && request.resource.data.keys().hasAll(['eventId', 'gate', 'device', 'scannedAt']);
       allow update: if isOwner(get(/databases/$(database)/documents/gp_gates/$(code)).data.eventId);
@@ -329,6 +349,27 @@ service cloud.firestore {
               .hasAny(['passToken', 'reviewedAt', 'reviewedBy'])
             && request.resource.data.get('status', 'pending') == 'pending');
     }
+    // Paid-pass order state (docs/paid-passes.md): an order starts
+    // 'unpaid' — a member may never CREATE an RSVP already claiming a
+    // payment, nor attach a payment id at create time. After checkout
+    // the browser may move its own order to 'client_paid_unverified'
+    // (exactly what the name says: reported by the client, not proof).
+    // 'verified' is written ONLY by the payment-verifier Cloud Function
+    // (Admin SDK bypasses these rules); a member write that sets it, or
+    // that moves an already-verified order anywhere, is denied. The
+    // dashboard labels client-reported orders UNVERIFIED — that label,
+    // plus the verifier, is the mitigation at this trust level.
+    function memberPayCreateOk() {
+      return request.resource.data.get('pay_status', 'unpaid') == 'unpaid'
+        && request.resource.data.get('razorpay_payment_id', null) == null;
+    }
+    function memberPayUpdateOk() {
+      let prevStatus = resource.data.get('pay_status', 'unpaid');
+      let nextStatus = request.resource.data.get('pay_status', prevStatus);
+      return prevStatus == 'verified'
+        ? nextStatus == 'verified'
+        : (nextStatus == 'unpaid' || nextStatus == 'client_paid_unverified');
+    }
 
     match /gp_events_v2/{eventId} {
       // Link-only private events: the long unguessable URL is the capability,
@@ -359,9 +400,9 @@ service cloud.firestore {
       // Only the member themselves may create an RSVP. Once created, either the
       // event owner (member directory edits) or the member (own details) may
       // update/delete it.
-      allow create: if signedIn() && uid == request.auth.uid && memberCreateApprovalOk(eventId);
+      allow create: if signedIn() && uid == request.auth.uid && memberCreateApprovalOk(eventId) && memberPayCreateOk();
       allow update: if isOwnerEventV2(eventId)
-        || (signedIn() && uid == request.auth.uid && memberUpdateApprovalOk(eventId));
+        || (signedIn() && uid == request.auth.uid && memberUpdateApprovalOk(eventId) && memberPayUpdateOk());
       allow delete: if isOwnerEventV2(eventId) || (signedIn() && uid == request.auth.uid);
     }
 
@@ -389,6 +430,15 @@ service cloud.firestore {
     match /gp_members_public/{eventId}/m/{uid} {
       allow read: if true;
       allow create, update, delete: if signedIn() && (uid == request.auth.uid || isOwnerEventV2(eventId));
+    }
+
+    // Public site config, set by the owner from the Firebase console
+    // only (no client writes at all). Holds publishable values ONLY —
+    // currently the Razorpay key ID for paid passes. The key SECRET
+    // must never be stored here; it belongs to the verifier function.
+    match /gp_config/{docId} {
+      allow read: if docId == 'public';
+      allow write: if false;
     }
   }
 }
